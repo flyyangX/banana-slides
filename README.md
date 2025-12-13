@@ -14,7 +14,7 @@
 
 [![Version](https://img.shields.io/badge/version-v0.1.0-4CAF50.svg)](https://github.com/Anionex/banana-slides)
 ![Docker](https://img.shields.io/badge/Docker-Build-2496ED?logo=docker&logoColor=white)
-[![License](https://img.shields.io/github/license/Anionex/banana-slides?color=FFD54F)](https://github.com/Anionex/banana-slides/blob/main/LICENSE)
+[![GitHub issues](https://img.shields.io/github/issues/Anionex/banana-slides?color=FFD54F)](https://github.com/Anionex/banana-slides/issues)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-42b883.svg)
 
 </p> 
