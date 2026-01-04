@@ -208,10 +208,10 @@ class BaiduInpaintingProvider:
         for bbox in bboxes:
             x0, y0, x1, y1 = bbox
             # 扩展区域
-            x0 = max(0, x0 - expand_pixels)
-            y0 = max(0, y0 - expand_pixels)
-            x1 = min(image.width, x1 + expand_pixels)
-            y1 = min(image.height, y1 + expand_pixels)
+            x0 = max(1, x0 - expand_pixels)
+            y0 = max(1, y0 - expand_pixels)
+            x1 = min(image.width - 1, x1 + expand_pixels)
+            y1 = min(image.height - 1, y1 + expand_pixels)
             
             rectangles.append({
                 'left': int(x0),
