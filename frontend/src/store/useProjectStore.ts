@@ -3,6 +3,37 @@ import type { Project, Task } from '@/types';
 import * as api from '@/api/endpoints';
 import { debounce, normalizeProject, normalizeErrorMessage } from '@/utils';
 
+const PAGE_GENERATING_STARTED_AT_KEY = 'pageGeneratingStartedAt';
+
+const loadPageGeneratingStartedAt = (): Record<string, number> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.sessionStorage.getItem(PAGE_GENERATING_STARTED_AT_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    return Object.keys(parsed).reduce<Record<string, number>>((acc, key) => {
+      const value = parsed[key];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        acc[key] = value;
+      }
+      return acc;
+    }, {});
+  } catch (error) {
+    console.warn('[pageGeneratingStartedAt] 读取 sessionStorage 失败:', error);
+    return {};
+  }
+};
+
+const savePageGeneratingStartedAt = (value: Record<string, number>) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(PAGE_GENERATING_STARTED_AT_KEY, JSON.stringify(value));
+  } catch (error) {
+    console.warn('[pageGeneratingStartedAt] 写入 sessionStorage 失败:', error);
+  }
+};
+
 interface ProjectState {
   // 状态
   currentProject: Project | null;
@@ -12,6 +43,8 @@ interface ProjectState {
   error: string | null;
   // 每个页面的生成任务ID映射 (pageId -> taskId)
   pageGeneratingTasks: Record<string, string>;
+  // 每个页面的生成开始时间 (pageId -> timestamp)
+  pageGeneratingStartedAt: Record<string, number>;
   // 每个页面的描述生成状态 (pageId -> boolean)
   pageDescriptionGeneratingTasks: Record<string, boolean>;
 
@@ -41,7 +74,16 @@ interface ProjectState {
   generateFromDescription: () => Promise<void>;
   generateDescriptions: () => Promise<void>;
   generatePageDescription: (pageId: string) => Promise<void>;
-  generateImages: (pageIds?: string[]) => Promise<void>;
+  generateImages: (pageIds?: string[], options?: { useTemplate?: boolean }) => Promise<void>;
+  generateSinglePageImage: (
+    pageId: string,
+    options?: {
+      extraRequirements?: string;
+      refImageUrls?: string[];
+      uploadedFiles?: File[];
+      useTemplate?: boolean;
+    }
+  ) => Promise<void>;
   editPageImage: (
     pageId: string,
     editPrompt: string,
@@ -51,6 +93,7 @@ interface ProjectState {
       uploadedFiles?: File[];
     }
   ) => Promise<void>;
+  clearPageImage: (pageId: string) => Promise<void>;
   
   // 导出
   exportPPTX: (pageIds?: string[]) => Promise<void>;
@@ -73,6 +116,11 @@ const debouncedUpdatePage = debounce(
     // 如果更新的是 outline_content，使用专门的端点
     if (data.outline_content) {
       promises.push(api.updatePageOutline(projectId, pageId, data.outline_content));
+    }
+
+    // 如果更新的是 page_type，使用专门的端点
+    if (data.page_type) {
+      promises.push(api.updatePageType(projectId, pageId, data.page_type));
     }
     
     // 如果没有特定的内容更新，使用通用端点
@@ -104,6 +152,7 @@ const debouncedUpdatePage = debounce(
   taskProgress: null,
   error: null,
   pageGeneratingTasks: {},
+  pageGeneratingStartedAt: loadPageGeneratingStartedAt(),
   pageDescriptionGeneratingTasks: {},
 
   // Setters
@@ -204,7 +253,25 @@ const debouncedUpdatePage = debounce(
           pagesCount: project.pages?.length || 0,
           status: project.status
         });
-        set({ currentProject: project });
+        const { pageGeneratingStartedAt, pageGeneratingTasks } = get();
+        const generatingPageIds = new Set(
+          project.pages
+            .filter((page) => page.status === 'GENERATING' && page.id)
+            .map((page) => page.id as string)
+        );
+        const updatedStartedAt = { ...pageGeneratingStartedAt };
+        Object.keys(updatedStartedAt).forEach((pageId) => {
+          if (!generatingPageIds.has(pageId)) {
+            delete updatedStartedAt[pageId];
+          }
+        });
+        generatingPageIds.forEach((pageId) => {
+          if (!updatedStartedAt[pageId] && pageGeneratingTasks[pageId]) {
+            updatedStartedAt[pageId] = Date.now();
+          }
+        });
+        savePageGeneratingStartedAt(updatedStartedAt);
+        set({ currentProject: project, pageGeneratingStartedAt: updatedStartedAt });
         // 确保 localStorage 中保存了项目ID
         localStorage.setItem('currentProjectId', project.id!);
       }
@@ -664,7 +731,7 @@ const debouncedUpdatePage = debounce(
   },
 
   // 生成图片（非阻塞，每个页面显示生成状态）
-  generateImages: async (pageIds?: string[]) => {
+  generateImages: async (pageIds?: string[], options?: { useTemplate?: boolean }) => {
     const { currentProject, pageGeneratingTasks } = get();
     if (!currentProject) return;
 
@@ -675,43 +742,78 @@ const debouncedUpdatePage = debounce(
     const alreadyGenerating = targetPageIds.filter(id => pageGeneratingTasks[id]);
     if (alreadyGenerating.length > 0) {
       console.log(`[批量生成] ${alreadyGenerating.length} 个页面正在生成中，跳过`);
-      // 过滤掉已经在生成的页面
-      const newPageIds = targetPageIds.filter(id => !pageGeneratingTasks[id]);
-      if (newPageIds.length === 0) {
-        console.log('[批量生成] 所有页面都在生成中，跳过请求');
-        return;
-      }
+    }
+    const filteredPageIds = targetPageIds.filter(id => !pageGeneratingTasks[id]);
+    if (filteredPageIds.length === 0) {
+      console.log('[批量生成] 所有页面都在生成中，跳过请求');
+      return;
     }
 
     set({ error: null });
-    
+
     try {
-      // 调用批量生成 API
-      const response = await api.generateImages(currentProject.id, undefined, pageIds);
-      const taskId = response.data?.task_id;
-      
-      if (taskId) {
-        console.log(`[批量生成] 收到 task_id: ${taskId}，标记 ${targetPageIds.length} 个页面为生成中`);
-        
-        // 为所有目标页面设置任务ID
-        const newPageGeneratingTasks = { ...pageGeneratingTasks };
-        targetPageIds.forEach(id => {
-          newPageGeneratingTasks[id] = taskId;
-        });
-        set({ pageGeneratingTasks: newPageGeneratingTasks });
-        
-        // 立即同步一次项目数据，以获取后端设置的 'GENERATING' 状态
-        await get().syncProject();
-        
-        // 开始轮询批量任务状态（非阻塞）
-        get().pollImageTask(taskId, targetPageIds);
-      } else {
-        // 如果没有返回 task_id，可能是同步接口，直接刷新
-        await get().syncProject();
+      // 多页选择：逐页提交生成任务，避免批量阻塞
+      for (const pageId of filteredPageIds) {
+        if (pageGeneratingTasks[pageId]) continue;
+        await get().generateSinglePageImage(pageId, options);
       }
     } catch (error: any) {
       console.error('[批量生成] 启动失败:', error);
       set({ error: normalizeErrorMessage(error.message || '批量生成图片失败') });
+      throw error;
+    }
+  },
+
+  // 生成单页图片（支持单页额外提示词 & 额外参考图）
+  generateSinglePageImage: async (pageId: string, options?: {
+    extraRequirements?: string;
+    refImageUrls?: string[];
+    uploadedFiles?: File[];
+    useTemplate?: boolean;
+  }) => {
+    const { currentProject, pageGeneratingTasks, pageGeneratingStartedAt } = get();
+    if (!currentProject || !currentProject.id) return;
+    if (!pageId) return;
+
+    // 如果该页面正在生成，不重复提交
+    if (pageGeneratingTasks[pageId]) return;
+
+    set({ error: null });
+
+    try {
+      const response = await api.generatePageImage(
+        currentProject.id,
+        pageId,
+        true,
+        undefined,
+        options
+      );
+      const taskId = response.data?.task_id;
+
+      if (taskId) {
+        const nextStartedAt = {
+          ...pageGeneratingStartedAt,
+          [pageId]: pageGeneratingStartedAt[pageId] || Date.now(),
+        };
+        savePageGeneratingStartedAt(nextStartedAt);
+        set({
+          pageGeneratingTasks: {
+            ...pageGeneratingTasks,
+            [pageId]: taskId,
+          },
+          pageGeneratingStartedAt: nextStartedAt,
+        });
+
+        // 立即同步一次项目数据，以获取后端设置的 'GENERATING' 状态
+        await get().syncProject(currentProject.id);
+
+        // 轮询任务（复用现有逻辑）
+        get().pollImageTask(taskId, [pageId]);
+      } else {
+        await get().syncProject(currentProject.id);
+      }
+    } catch (error: any) {
+      set({ error: normalizeErrorMessage(error.message || '生成单页图片失败') });
       throw error;
     }
   },
@@ -740,28 +842,35 @@ const debouncedUpdatePage = debounce(
         if (task.status === 'COMPLETED') {
           console.log(`[批量轮询] Task ${taskId} 已完成，清除任务记录`);
           // 清除所有相关页面的任务记录
-          const { pageGeneratingTasks } = get();
+          const { pageGeneratingTasks, pageGeneratingStartedAt } = get();
           const newTasks = { ...pageGeneratingTasks };
+          const newStartedAt = { ...pageGeneratingStartedAt };
           pageIds.forEach(id => {
             if (newTasks[id] === taskId) {
               delete newTasks[id];
+              delete newStartedAt[id];
             }
           });
-          set({ pageGeneratingTasks: newTasks });
+          savePageGeneratingStartedAt(newStartedAt);
+          set({ pageGeneratingTasks: newTasks, pageGeneratingStartedAt: newStartedAt });
           // 刷新项目数据
           await get().syncProject();
         } else if (task.status === 'FAILED') {
           console.error(`[批量轮询] Task ${taskId} 失败:`, task.error_message || task.error);
           // 清除所有相关页面的任务记录
-          const { pageGeneratingTasks } = get();
+          const { pageGeneratingTasks, pageGeneratingStartedAt } = get();
           const newTasks = { ...pageGeneratingTasks };
+          const newStartedAt = { ...pageGeneratingStartedAt };
           pageIds.forEach(id => {
             if (newTasks[id] === taskId) {
               delete newTasks[id];
+              delete newStartedAt[id];
             }
           });
+          savePageGeneratingStartedAt(newStartedAt);
           set({ 
             pageGeneratingTasks: newTasks,
+            pageGeneratingStartedAt: newStartedAt,
             error: normalizeErrorMessage(task.error_message || task.error || '批量生成失败')
           });
           // 刷新项目数据以更新页面状态
@@ -775,26 +884,32 @@ const debouncedUpdatePage = debounce(
         } else {
           // 未知状态，停止轮询
           console.warn(`[批量轮询] Task ${taskId} 未知状态: ${task.status}，停止轮询`);
-          const { pageGeneratingTasks } = get();
+          const { pageGeneratingTasks, pageGeneratingStartedAt } = get();
           const newTasks = { ...pageGeneratingTasks };
+          const newStartedAt = { ...pageGeneratingStartedAt };
           pageIds.forEach(id => {
             if (newTasks[id] === taskId) {
               delete newTasks[id];
+              delete newStartedAt[id];
             }
           });
-          set({ pageGeneratingTasks: newTasks });
+          savePageGeneratingStartedAt(newStartedAt);
+          set({ pageGeneratingTasks: newTasks, pageGeneratingStartedAt: newStartedAt });
         }
       } catch (error: any) {
         console.error('[批量轮询] 轮询错误:', error);
         // 清除所有相关页面的任务记录
-        const { pageGeneratingTasks } = get();
+        const { pageGeneratingTasks, pageGeneratingStartedAt } = get();
         const newTasks = { ...pageGeneratingTasks };
+        const newStartedAt = { ...pageGeneratingStartedAt };
         pageIds.forEach(id => {
           if (newTasks[id] === taskId) {
             delete newTasks[id];
+            delete newStartedAt[id];
           }
         });
-        set({ pageGeneratingTasks: newTasks });
+        savePageGeneratingStartedAt(newStartedAt);
+        set({ pageGeneratingTasks: newTasks, pageGeneratingStartedAt: newStartedAt });
       }
     };
 
@@ -804,7 +919,7 @@ const debouncedUpdatePage = debounce(
 
   // 编辑页面图片（异步）
   editPageImage: async (pageId, editPrompt, contextImages) => {
-    const { currentProject, pageGeneratingTasks } = get();
+    const { currentProject, pageGeneratingTasks, pageGeneratingStartedAt } = get();
     if (!currentProject) return;
 
     // 如果该页面正在生成，不重复提交
@@ -820,8 +935,14 @@ const debouncedUpdatePage = debounce(
       
       if (taskId) {
         // 记录该页面的任务ID
+        const nextStartedAt = {
+          ...pageGeneratingStartedAt,
+          [pageId]: pageGeneratingStartedAt[pageId] || Date.now(),
+        };
+        savePageGeneratingStartedAt(nextStartedAt);
         set({ 
-          pageGeneratingTasks: { ...pageGeneratingTasks, [pageId]: taskId }
+          pageGeneratingTasks: { ...pageGeneratingTasks, [pageId]: taskId },
+          pageGeneratingStartedAt: nextStartedAt,
         });
         
         // 立即同步一次项目数据，以获取后端设置的'GENERATING'状态
@@ -835,10 +956,36 @@ const debouncedUpdatePage = debounce(
       }
     } catch (error: any) {
       // 清除该页面的任务记录
-      const { pageGeneratingTasks } = get();
+      const { pageGeneratingTasks, pageGeneratingStartedAt } = get();
       const newTasks = { ...pageGeneratingTasks };
+      const newStartedAt = { ...pageGeneratingStartedAt };
       delete newTasks[pageId];
-      set({ pageGeneratingTasks: newTasks, error: normalizeErrorMessage(error.message || '编辑图片失败') });
+      delete newStartedAt[pageId];
+      savePageGeneratingStartedAt(newStartedAt);
+      set({
+        pageGeneratingTasks: newTasks,
+        pageGeneratingStartedAt: newStartedAt,
+        error: normalizeErrorMessage(error.message || '编辑图片失败'),
+      });
+      throw error;
+    }
+  },
+
+  clearPageImage: async (pageId: string) => {
+    const { currentProject, pageGeneratingTasks, pageGeneratingStartedAt } = get();
+    if (!currentProject || !currentProject.id || !pageId) return;
+    if (pageGeneratingTasks[pageId]) return;
+
+    set({ error: null });
+    try {
+      await api.clearPageImage(currentProject.id, pageId);
+      const nextStartedAt = { ...pageGeneratingStartedAt };
+      delete nextStartedAt[pageId];
+      savePageGeneratingStartedAt(nextStartedAt);
+      set({ pageGeneratingStartedAt: nextStartedAt });
+      await get().syncProject(currentProject.id);
+    } catch (error: any) {
+      set({ error: normalizeErrorMessage(error.message || '清除图片失败') });
       throw error;
     }
   },

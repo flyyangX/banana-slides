@@ -80,7 +80,7 @@ def _resolve_target_project_id(raw_project_id: Optional[str], allow_none: bool =
     Normalize project_id from request.
     Returns (project_id | None, error_response | None)
     """
-    if allow_none and (raw_project_id is None or raw_project_id == 'none'):
+    if allow_none and (raw_project_id is None or raw_project_id in ('none', 'global')):
         return None, None
 
     if raw_project_id == 'all':
@@ -373,6 +373,124 @@ def delete_material(material_id):
             current_app.logger.warning(f"Failed to delete file for material {material_id} at {material_path}: {e}")
 
         return success_response({"id": material_id})
+    except Exception as e:
+        db.session.rollback()
+        return error_response('SERVER_ERROR', str(e), 500)
+
+
+@material_global_bp.route('/<material_id>', methods=['PATCH'])
+def update_material_meta(material_id):
+    """
+    PATCH /api/materials/{material_id} - Update material metadata (display_name, note)
+    """
+    try:
+        material = Material.query.get(material_id)
+        if not material:
+            return not_found('Material')
+
+        data = request.get_json() or {}
+        has_updates = False
+        if 'display_name' in data:
+            material.display_name = data.get('display_name')
+            has_updates = True
+        if 'note' in data:
+            material.note = data.get('note')
+            has_updates = True
+
+        if not has_updates:
+            return bad_request("display_name or note is required")
+
+        db.session.commit()
+        return success_response({"material": material.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        return error_response('SERVER_ERROR', str(e), 500)
+
+
+@material_global_bp.route('/<material_id>/move', methods=['POST'])
+def move_material(material_id):
+    """
+    POST /api/materials/{material_id}/move - Move material to target project or global
+
+    Request body (JSON):
+    {
+        "target_project_id": "project_id" | "none" | "global"
+    }
+    """
+    try:
+        material = Material.query.get(material_id)
+        if not material:
+            return not_found('Material')
+
+        data = request.get_json() or {}
+        raw_target_project_id = data.get('target_project_id')
+        target_project_id, error = _resolve_target_project_id(raw_target_project_id, allow_none=True)
+        if error:
+            return error
+
+        file_service = FileService(current_app.config['UPLOAD_FOLDER'])
+        new_relative_path, new_filename = file_service.move_material_file(
+            material.relative_path,
+            target_project_id
+        )
+
+        material.project_id = target_project_id
+        material.relative_path = new_relative_path
+        material.filename = new_filename
+        material.url = file_service.get_file_url(target_project_id, 'materials', new_filename)
+        db.session.commit()
+
+        return success_response({"material": material.to_dict()})
+    except FileNotFoundError as e:
+        db.session.rollback()
+        return error_response('NOT_FOUND', str(e), 404)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('SERVER_ERROR', str(e), 500)
+
+
+@material_global_bp.route('/<material_id>/copy', methods=['POST'])
+def copy_material(material_id):
+    """
+    POST /api/materials/{material_id}/copy - Copy material to target project or global
+
+    Request body (JSON):
+    {
+        "target_project_id": "project_id" | "none" | "global"
+    }
+    """
+    try:
+        material = Material.query.get(material_id)
+        if not material:
+            return not_found('Material')
+
+        data = request.get_json() or {}
+        raw_target_project_id = data.get('target_project_id')
+        target_project_id, error = _resolve_target_project_id(raw_target_project_id, allow_none=True)
+        if error:
+            return error
+
+        file_service = FileService(current_app.config['UPLOAD_FOLDER'])
+        new_relative_path, new_filename = file_service.copy_material_file(
+            material.relative_path,
+            target_project_id
+        )
+
+        new_material = Material(
+            project_id=target_project_id,
+            filename=new_filename,
+            relative_path=new_relative_path,
+            url=file_service.get_file_url(target_project_id, 'materials', new_filename),
+            display_name=material.display_name,
+            note=material.note,
+        )
+        db.session.add(new_material)
+        db.session.commit()
+
+        return success_response({"material": new_material.to_dict()}, status_code=201)
+    except FileNotFoundError as e:
+        db.session.rollback()
+        return error_response('NOT_FOUND', str(e), 404)
     except Exception as e:
         db.session.rollback()
         return error_response('SERVER_ERROR', str(e), 500)

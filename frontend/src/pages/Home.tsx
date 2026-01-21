@@ -56,6 +56,17 @@ export const Home: React.FC = () => {
     setIsMaterialModalOpen(true);
   };
 
+  const handleOpenMaterialsLibrary = () => {
+    // 素材库目前是按项目维度展示（/project/:projectId/materials）
+    // 从 localStorage 读取当前项目（由 store 在创建/同步项目时写入）
+    const pid = localStorage.getItem('currentProjectId');
+    if (!pid) {
+      show({ message: '请先创建或打开一个项目，再进入素材库', type: 'info' });
+      return;
+    }
+    navigate(`/project/${pid}/materials`);
+  };
+
   // 检测粘贴事件，自动上传文件和图片
   const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     console.log('Paste event triggered');
@@ -497,6 +508,16 @@ export const Home: React.FC = () => {
             >
               <span className="hidden md:inline">素材生成</span>
             </Button>
+            {/* 桌面端：带文字的素材库按钮 */}
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Palette size={16} className="md:w-[18px] md:h-[18px]" />}
+              onClick={handleOpenMaterialsLibrary}
+              className="hidden sm:inline-flex hover:bg-banana-100/60 hover:shadow-sm hover:scale-105 transition-all duration-200 font-medium"
+            >
+              <span className="hidden md:inline">素材库</span>
+            </Button>
             {/* 手机端：仅图标的素材生成按钮 */}
             <Button
               variant="ghost"
@@ -505,6 +526,15 @@ export const Home: React.FC = () => {
               onClick={handleOpenMaterialModal}
               className="sm:hidden hover:bg-banana-100/60 hover:shadow-sm hover:scale-105 transition-all duration-200"
               title="素材生成"
+            />
+            {/* 手机端：仅图标的素材库按钮 */}
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Palette size={16} />}
+              onClick={handleOpenMaterialsLibrary}
+              className="sm:hidden hover:bg-banana-100/60 hover:shadow-sm hover:scale-105 transition-all duration-200"
+              title="素材库"
             />
             <Button 
               variant="ghost" 

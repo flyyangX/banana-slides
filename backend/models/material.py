@@ -15,6 +15,8 @@ class Material(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     project_id = db.Column(db.String(36), db.ForeignKey('projects.id'), nullable=True)  # Can be null, for global materials not belonging to a project
     filename = db.Column(db.String(500), nullable=False)
+    display_name = db.Column(db.String(255), nullable=True)
+    note = db.Column(db.Text, nullable=True)
     relative_path = db.Column(db.String(500), nullable=False)  # Path relative to the upload_folder
     url = db.Column(db.String(500), nullable=False)  # URL accessible by the frontend
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
@@ -29,6 +31,8 @@ class Material(db.Model):
             'id': self.id,
             'project_id': self.project_id,
             'filename': self.filename,
+            'display_name': self.display_name,
+            'note': self.note,
             'url': self.url,
             'relative_path': self.relative_path,
             'created_at': self.created_at.isoformat() if self.created_at else None,

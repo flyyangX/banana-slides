@@ -25,7 +25,7 @@ import {
 import { Button, Loading, Modal, Textarea, useToast, useConfirm, MaterialSelector, ProjectSettingsModal, ExportTasksPanel } from '@/components/shared';
 import { MaterialGeneratorModal } from '@/components/shared/MaterialGeneratorModal';
 import { TemplateSelector, getTemplateFile } from '@/components/shared/TemplateSelector';
-import { listUserTemplates, type UserTemplate } from '@/api/endpoints';
+import { deleteTemplate, listUserTemplates, type UserTemplate } from '@/api/endpoints';
 import { materialUrlToFile } from '@/components/shared/MaterialSelector';
 import type { Material } from '@/api/endpoints';
 import { SlideCard } from '@/components/preview/SlideCard';
@@ -45,12 +45,15 @@ export const SlidePreview: React.FC = () => {
     currentProject,
     syncProject,
     generateImages,
+    generateSinglePageImage,
     editPageImage,
     deletePageById,
     updatePageLocal,
+    clearPageImage,
     isGlobalLoading,
     taskProgress,
     pageGeneratingTasks,
+    pageGeneratingStartedAt,
   } = useProjectStore();
   
   const { addTask, pollTask: pollExportTask, tasks: exportTasks, restoreActiveTasks } = useExportTasksStore();
@@ -63,6 +66,12 @@ export const SlidePreview: React.FC = () => {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
+  const [isRegenerateModalOpen, setIsRegenerateModalOpen] = useState(false);
+  const [isSubmittingRegenerate, setIsSubmittingRegenerate] = useState(false);
+  const [regenerateExtraPrompt, setRegenerateExtraPrompt] = useState('');
+  const [regenerateRefImageUrls, setRegenerateRefImageUrls] = useState<string[]>([]);
+  const [regenerateUploadedFiles, setRegenerateUploadedFiles] = useState<File[]>([]);
+  const [isRegenerateMaterialSelectorOpen, setIsRegenerateMaterialSelectorOpen] = useState(false);
   const [editPrompt, setEditPrompt] = useState('');
   // 大纲和描述编辑状态
   const [editOutlineTitle, setEditOutlineTitle] = useState('');
@@ -81,6 +90,7 @@ export const SlidePreview: React.FC = () => {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [selectedPresetTemplateId, setSelectedPresetTemplateId] = useState<string | null>(null);
   const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
+  const [isClearingTemplate, setIsClearingTemplate] = useState(false);
   const [selectedContextImages, setSelectedContextImages] = useState<{
     useTemplate: boolean;
     descImageUrls: string[];
@@ -94,6 +104,7 @@ export const SlidePreview: React.FC = () => {
   const [isSavingRequirements, setIsSavingRequirements] = useState(false);
   const isEditingRequirements = useRef(false); // 跟踪用户是否正在编辑额外要求
   const [templateStyle, setTemplateStyle] = useState<string>('');
+  const [templateUsageMode, setTemplateUsageMode] = useState<'auto' | 'template' | 'style'>('auto');
   const [isSavingTemplateStyle, setIsSavingTemplateStyle] = useState(false);
   const isEditingTemplateStyle = useRef(false); // 跟踪用户是否正在编辑风格描述
   const lastProjectId = useRef<string | null>(null); // 跟踪上一次的项目ID
@@ -103,6 +114,7 @@ export const SlidePreview: React.FC = () => {
   // 素材选择器模态开关
   const [userTemplates, setUserTemplates] = useState<UserTemplate[]>([]);
   const [isMaterialSelectorOpen, setIsMaterialSelectorOpen] = useState(false);
+  const [now, setNow] = useState(Date.now());
   // 导出设置
   const [exportExtractorMethod, setExportExtractorMethod] = useState<ExportExtractorMethod>(
     (currentProject?.export_extractor_method as ExportExtractorMethod) || 'hybrid'
@@ -130,10 +142,51 @@ export const SlidePreview: React.FC = () => {
   const { show, ToastContainer } = useToast();
   const { confirm, ConfirmDialog } = useConfirm();
 
+  const hasTemplateResource = useMemo(() => {
+    const variants = currentProject?.template_variants || {};
+    const hasVariants = Object.values(variants).some(Boolean);
+    return Boolean(currentProject?.template_image_path) || hasVariants;
+  }, [currentProject?.template_image_path, currentProject?.template_variants]);
+
   // Memoize pages with generated images to avoid re-computing in multiple places
   const pagesWithImages = useMemo(() => {
     return currentProject?.pages.filter(p => p.id && p.generated_image_path) || [];
   }, [currentProject?.pages]);
+  const pagesWithImagesIdSet = useMemo(() => {
+    return new Set(pagesWithImages.map(p => p.id!).filter(Boolean));
+  }, [pagesWithImages]);
+
+  const hasGeneratingPages = useMemo(() => {
+    return Object.keys(pageGeneratingTasks || {}).length > 0;
+  }, [pageGeneratingTasks]);
+
+  useEffect(() => {
+    if (!hasGeneratingPages) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [hasGeneratingPages]);
+
+  const formatElapsed = useCallback((seconds: number) => {
+    const safeSeconds = Math.max(0, seconds);
+    const hours = Math.floor(safeSeconds / 3600);
+    const minutes = Math.floor((safeSeconds % 3600) / 60);
+    const secs = safeSeconds % 60;
+    if (hours > 0) {
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }, []);
+
+  const getElapsedSeconds = useCallback((pageId?: string | null) => {
+    if (!pageId) return undefined;
+    const startedAt = pageGeneratingStartedAt?.[pageId];
+    if (!startedAt) return undefined;
+    return Math.floor((now - startedAt) / 1000);
+  }, [now, pageGeneratingStartedAt]);
 
   // 加载项目数据 & 用户模板
   useEffect(() => {
@@ -184,7 +237,11 @@ export const SlidePreview: React.FC = () => {
       }
       // 如果用户正在编辑，则不更新本地状态
     }
-  }, [currentProject?.id, currentProject?.extra_requirements, currentProject?.template_style]);
+  }, [
+    currentProject?.id,
+    currentProject?.extra_requirements,
+    currentProject?.template_style,
+  ]);
 
   // 加载当前页面的历史版本
   useEffect(() => {
@@ -226,8 +283,10 @@ export const SlidePreview: React.FC = () => {
       : currentProject?.pages;
     const hasImages = pagesToGenerate?.some((p) => p.generated_image_path);
     
+    const useTemplateOption =
+      templateUsageMode === 'auto' ? undefined : templateUsageMode === 'template';
     const executeGenerate = async () => {
-      await generateImages(pageIds);
+      await generateImages(pageIds, { useTemplate: useTemplateOption });
     };
     
     if (hasImages) {
@@ -254,40 +313,79 @@ export const SlidePreview: React.FC = () => {
       show({ message: '该页面正在生成中，请稍候...', type: 'info' });
       return;
     }
-    
-    try {
-      // 使用统一的 generateImages，传入单个页面 ID
-      await generateImages([page.id]);
-      show({ message: '已开始生成图片，请稍候...', type: 'success' });
-    } catch (error: any) {
-      // 提取后端返回的更具体错误信息
-      let errorMessage = '生成失败';
-      const respData = error?.response?.data;
 
-      if (respData) {
-        if (respData.error?.message) {
-          errorMessage = respData.error.message;
-        } else if (respData.message) {
-          errorMessage = respData.message;
-        } else if (respData.error) {
-          errorMessage =
-            typeof respData.error === 'string'
-              ? respData.error
-              : respData.error.message || errorMessage;
-        }
-      } else if (error.message) {
-        errorMessage = error.message;
-      }
+    // 打开“重新生成”对话框（支持单页额外提示词 + 额外参考图）
+    setRegenerateExtraPrompt('');
+    setRegenerateRefImageUrls([]);
+    setRegenerateUploadedFiles([]);
+    setIsRegenerateModalOpen(true);
+  }, [currentProject, selectedIndex, pageGeneratingTasks, show]);
 
-      // 使用统一的错误消息规范化函数
-      errorMessage = normalizeErrorMessage(errorMessage);
-
-      show({
-        message: errorMessage,
-        type: 'error',
-      });
+  const handleClearPageImage = useCallback(() => {
+    if (!currentProject) return;
+    const page = currentProject.pages[selectedIndex];
+    if (!page?.id) return;
+    if (pageGeneratingTasks[page.id]) {
+      show({ message: '该页面正在生成中，请稍候...', type: 'info' });
+      return;
     }
-  }, [currentProject, selectedIndex, pageGeneratingTasks, generateImages, show]);
+    confirm(
+      '确定要清除该页图片吗？清除后将无法恢复历史版本。',
+      async () => {
+        await clearPageImage(page.id as string);
+      },
+      { title: '清除图片', variant: 'danger' }
+    );
+  }, [clearPageImage, confirm, currentProject, pageGeneratingTasks, selectedIndex, show]);
+
+  const handleRegenerateAddFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setRegenerateUploadedFiles((prev) => [...prev, ...files]);
+    e.target.value = '';
+  };
+
+  const removeRegenerateFile = (index: number) => {
+    setRegenerateUploadedFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const removeRegenerateUrl = (index: number) => {
+    setRegenerateRefImageUrls((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleConfirmRegenerate = async () => {
+    if (!currentProject) return;
+    const page = currentProject.pages[selectedIndex];
+    if (!page?.id) return;
+    if (isSubmittingRegenerate) return;
+
+    const useTemplateOption =
+      templateUsageMode === 'auto' ? undefined : templateUsageMode === 'template';
+
+    // 交互优化：立刻反馈 + 禁止重复点击 + 非阻塞提交
+    setIsSubmittingRegenerate(true);
+    setIsRegenerateModalOpen(false);
+    show({ message: '正在创建生成任务，请稍候...', type: 'info' });
+
+    generateSinglePageImage(page.id, {
+      extraRequirements: regenerateExtraPrompt,
+      refImageUrls: regenerateRefImageUrls,
+      uploadedFiles: regenerateUploadedFiles,
+      useTemplate: useTemplateOption,
+    })
+      .then(() => {
+        show({ message: '已开始生成本页图片，请稍候...', type: 'success' });
+      })
+      .catch((error: any) => {
+        show({
+          message: normalizeErrorMessage(error?.message || '生成失败'),
+          type: 'error',
+        });
+      })
+      .finally(() => {
+        setIsSubmittingRegenerate(false);
+      });
+  };
 
   const handleSwitchVersion = async (versionId: string) => {
     if (!currentProject || !selectedPage?.id || !projectId) return;
@@ -643,7 +741,7 @@ export const SlidePreview: React.FC = () => {
   };
 
   const selectAllPages = () => {
-    const allPageIds = pagesWithImages.map(p => p.id!);
+    const allPageIds = (currentProject?.pages || []).map(p => p.id!).filter(Boolean);
     setSelectedPageIds(new Set(allPageIds));
   };
 
@@ -661,7 +759,7 @@ export const SlidePreview: React.FC = () => {
     });
   };
 
-  // 获取有图片的选中页面ID列表
+  // 获取选中页面ID列表：如果未选择则返回 undefined（表示全量）
   const getSelectedPageIdsForExport = (): string[] | undefined => {
     if (!isMultiSelectMode || selectedPageIds.size === 0) {
       return undefined; // 导出全部
@@ -673,7 +771,16 @@ export const SlidePreview: React.FC = () => {
     setShowExportMenu(false);
     if (!projectId) return;
     
-    const pageIds = getSelectedPageIdsForExport();
+    // 导出需要已生成图片的页面；多选时如果勾了未生成页面，则自动忽略未生成的
+    const rawSelectedPageIds = getSelectedPageIdsForExport();
+    const pageIds = rawSelectedPageIds
+      ? rawSelectedPageIds.filter(id => pagesWithImagesIdSet.has(id))
+      : undefined;
+
+    if (isMultiSelectMode && rawSelectedPageIds && rawSelectedPageIds.length > 0 && (!pageIds || pageIds.length === 0)) {
+      show({ message: '选中的页面还没有生成图片，无法导出。请先生成图片。', type: 'info' });
+      return;
+    }
     const exportTaskId = `export-${Date.now()}`;
     
     try {
@@ -740,6 +847,11 @@ export const SlidePreview: React.FC = () => {
       show({ message: normalizeErrorMessage(error.message || '导出失败'), type: 'error' });
     }
   };
+
+  const selectedExportableCount = useMemo(() => {
+    if (!isMultiSelectMode || selectedPageIds.size === 0) return 0;
+    return Array.from(selectedPageIds).filter(id => pagesWithImagesIdSet.has(id)).length;
+  }, [isMultiSelectMode, selectedPageIds, pagesWithImagesIdSet]);
 
   const handleRefresh = useCallback(async () => {
     const targetProjectId = projectId || currentProject?.id;
@@ -846,7 +958,7 @@ export const SlidePreview: React.FC = () => {
     
     setIsUploadingTemplate(true);
     try {
-      await uploadTemplate(projectId, file);
+      await uploadTemplate(projectId, file, templateId);
       await syncProject(projectId);
       setIsTemplateModalOpen(false);
       show({ message: '模板更换成功', type: 'success' });
@@ -871,6 +983,32 @@ export const SlidePreview: React.FC = () => {
       setIsUploadingTemplate(false);
     }
   };
+
+  const handleClearTemplate = useCallback(() => {
+    if (!projectId) return;
+    if (!hasTemplateResource) {
+      show({ message: '当前项目没有模板可清除', type: 'info' });
+      return;
+    }
+    confirm(
+      '确定取消当前选中的模板吗？取消后将使用无模板模式生成（不会影响已生成页面）。',
+      async () => {
+        setIsClearingTemplate(true);
+        try {
+          await deleteTemplate(projectId);
+          await syncProject(projectId);
+          setSelectedTemplateId(null);
+          setSelectedPresetTemplateId(null);
+          show({ message: '已取消当前模板，可使用无模板模式生成', type: 'success' });
+        } catch (error: any) {
+          show({ message: `清除失败: ${error.message || '未知错误'}`, type: 'error' });
+        } finally {
+          setIsClearingTemplate(false);
+        }
+      },
+      { title: '取消模板', variant: 'warning' }
+    );
+  }, [confirm, hasTemplateResource, projectId, show, syncProject]);
 
   if (!currentProject) {
     return <Loading fullscreen message="加载项目中..." />;
@@ -1039,25 +1177,25 @@ export const SlidePreview: React.FC = () => {
                 setShowExportMenu(!showExportMenu);
                 setShowExportTasksPanel(false);
               }}
-              disabled={isMultiSelectMode ? selectedPageIds.size === 0 : !hasAllImages}
+              disabled={isMultiSelectMode ? selectedExportableCount === 0 : !hasAllImages}
               className="text-xs md:text-sm"
             >
               <span className="hidden sm:inline">
-                {isMultiSelectMode && selectedPageIds.size > 0 
-                  ? `导出 (${selectedPageIds.size})` 
+                {isMultiSelectMode && selectedExportableCount > 0 
+                  ? `导出 (${selectedExportableCount})` 
                   : '导出'}
               </span>
               <span className="sm:hidden">
-                {isMultiSelectMode && selectedPageIds.size > 0 
-                  ? `(${selectedPageIds.size})` 
+                {isMultiSelectMode && selectedExportableCount > 0 
+                  ? `(${selectedExportableCount})` 
                   : '导出'}
               </span>
             </Button>
             {showExportMenu && (
               <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-2 z-10">
-                {isMultiSelectMode && selectedPageIds.size > 0 && (
+                {isMultiSelectMode && selectedExportableCount > 0 && (
                   <div className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
-                    将导出选中的 {selectedPageIds.size} 页
+                    将导出选中的 {selectedExportableCount} 页（仅已生成图片的页面）
                   </div>
                 )}
                 <button
@@ -1094,7 +1232,7 @@ export const SlidePreview: React.FC = () => {
               icon={<Sparkles size={16} className="md:w-[18px] md:h-[18px]" />}
               onClick={handleGenerateAll}
               className="w-full text-sm md:text-base"
-              disabled={isMultiSelectMode && selectedPageIds.size === 0}
+              disabled={currentProject.pages.length === 0}
             >
               {isMultiSelectMode && selectedPageIds.size > 0
                 ? `生成选中页面 (${selectedPageIds.size})`
@@ -1120,10 +1258,10 @@ export const SlidePreview: React.FC = () => {
               {isMultiSelectMode && (
                 <>
                   <button
-                    onClick={selectedPageIds.size === pagesWithImages.length ? deselectAllPages : selectAllPages}
+                    onClick={selectedPageIds.size === currentProject.pages.length ? deselectAllPages : selectAllPages}
                     className="text-gray-500 hover:text-banana-600 transition-colors"
                   >
-                    {selectedPageIds.size === pagesWithImages.length ? '取消全选' : '全选'}
+                    {selectedPageIds.size === currentProject.pages.length ? '取消全选' : '全选'}
                   </button>
                   {selectedPageIds.size > 0 && (
                     <span className="text-banana-600 font-medium">
@@ -1140,7 +1278,7 @@ export const SlidePreview: React.FC = () => {
                   <div className="md:hidden relative">
                     <button
                       onClick={() => {
-                        if (isMultiSelectMode && page.id && page.generated_image_path) {
+                        if (isMultiSelectMode && page.id) {
                           togglePageSelection(page.id);
                         } else {
                           setSelectedIndex(index);
@@ -1165,7 +1303,7 @@ export const SlidePreview: React.FC = () => {
                       )}
                     </button>
                     {/* 多选复选框（移动端） */}
-                    {isMultiSelectMode && page.id && page.generated_image_path && (
+                    {isMultiSelectMode && page.id && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -1184,7 +1322,7 @@ export const SlidePreview: React.FC = () => {
                   {/* 桌面端：完整卡片 */}
                   <div className="hidden md:block relative">
                     {/* 多选复选框（桌面端） */}
-                    {isMultiSelectMode && page.id && page.generated_image_path && (
+                    {isMultiSelectMode && page.id && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -1204,7 +1342,7 @@ export const SlidePreview: React.FC = () => {
                       index={index}
                       isSelected={selectedIndex === index}
                       onClick={() => {
-                        if (isMultiSelectMode && page.id && page.generated_image_path) {
+                        if (isMultiSelectMode && page.id) {
                           togglePageSelection(page.id);
                         } else {
                           setSelectedIndex(index);
@@ -1216,6 +1354,7 @@ export const SlidePreview: React.FC = () => {
                       }}
                       onDelete={() => page.id && deletePageById(page.id)}
                       isGenerating={page.id ? !!pageGeneratingTasks[page.id] : false}
+                      elapsedSeconds={getElapsedSeconds(page.id)}
                     />
                   </div>
                 </div>
@@ -1264,7 +1403,10 @@ export const SlidePreview: React.FC = () => {
                           <div className="text-6xl mb-4">🍌</div>
                           <p className="text-gray-500 mb-4">
                             {selectedPage?.id && pageGeneratingTasks[selectedPage.id]
-                              ? '正在生成中...'
+                              ? `正在生成中... 已运行 ${formatElapsed(getElapsedSeconds(selectedPage.id) || 0)}`
+                              : selectedPage?.status === 'GENERATING' &&
+                                typeof getElapsedSeconds(selectedPage.id) === 'number'
+                              ? `正在生成中... 已运行 ${formatElapsed(getElapsedSeconds(selectedPage.id) || 0)}`
                               : selectedPage?.status === 'GENERATING'
                               ? '正在生成中...'
                               : '尚未生成图片'}
@@ -1323,6 +1465,15 @@ export const SlidePreview: React.FC = () => {
 
                   {/* 操作 */}
                   <div className="flex items-center gap-1.5 md:gap-2 w-full sm:w-auto justify-center">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<ImagePlus size={16} />}
+                      onClick={() => navigate(`/project/${projectId}/materials`)}
+                      className="hidden lg:inline-flex text-xs"
+                    >
+                      素材库
+                    </Button>
                     {/* 手机端：模板更换按钮 */}
                     <Button
                       variant="ghost"
@@ -1406,6 +1557,15 @@ export const SlidePreview: React.FC = () => {
                       className="text-xs md:text-sm flex-1 sm:flex-initial"
                     >
                       编辑
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleClearPageImage}
+                      disabled={!selectedPage?.generated_image_path || (selectedPage?.id ? !!pageGeneratingTasks[selectedPage.id] : false)}
+                      className="text-xs md:text-sm flex-1 sm:flex-initial"
+                    >
+                      清除图片
                     </Button>
                     <Button
                       variant="ghost"
@@ -1706,6 +1866,125 @@ export const SlidePreview: React.FC = () => {
           </div>
         </div>
       </Modal>
+
+      {/* 单页重新生成（支持单页额外提示词 + 参考图） */}
+      <Modal
+        isOpen={isRegenerateModalOpen}
+        onClose={() => setIsRegenerateModalOpen(false)}
+        title="重新生成本页"
+        size="lg"
+      >
+        <div className="space-y-4">
+          <Textarea
+            label="单页额外提示词（可选，仅本页生效）"
+            placeholder="例如：这页更像内容页，信息密度稍高；多用简洁图标；减少装饰..."
+            value={regenerateExtraPrompt}
+            onChange={(e) => setRegenerateExtraPrompt(e.target.value)}
+            rows={3}
+          />
+
+          <div className="bg-gray-50 rounded-lg border border-gray-200 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-semibold text-gray-700">额外参考图（可选）</div>
+              <div className="flex gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setIsRegenerateMaterialSelectorOpen(true)}
+                >
+                  从素材库选择
+                </Button>
+                <label className="inline-flex">
+                  <input
+                    type="file"
+                    multiple
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleRegenerateAddFiles}
+                  />
+                  <span className="inline-flex items-center justify-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 bg-white hover:bg-gray-50 cursor-pointer">
+                    上传图片
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            {(regenerateRefImageUrls.length > 0 || regenerateUploadedFiles.length > 0) ? (
+              <div className="space-y-2">
+                {regenerateRefImageUrls.map((u, idx) => (
+                  <div key={`${u}-${idx}`} className="flex items-center justify-between text-xs bg-white border border-gray-200 rounded-lg px-3 py-2">
+                    <div className="truncate pr-2">{u}</div>
+                    <button
+                      className="text-gray-500 hover:text-red-600"
+                      onClick={() => removeRegenerateUrl(idx)}
+                      type="button"
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+                {regenerateUploadedFiles.map((f, idx) => (
+                  <div key={`${f.name}-${idx}`} className="flex items-center justify-between text-xs bg-white border border-gray-200 rounded-lg px-3 py-2">
+                    <div className="truncate pr-2">{f.name}</div>
+                    <button
+                      className="text-gray-500 hover:text-red-600"
+                      onClick={() => removeRegenerateFile(idx)}
+                      type="button"
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-xs text-gray-500">不选择也可以直接重新生成（仅使用模板/套装 + 页面描述）</div>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="ghost"
+              onClick={() => setIsRegenerateModalOpen(false)}
+              disabled={isSubmittingRegenerate}
+            >
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleConfirmRegenerate}
+              disabled={isSubmittingRegenerate}
+            >
+              {isSubmittingRegenerate ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  正在提交...
+                </span>
+              ) : (
+                '开始生成'
+              )}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* 重新生成：素材选择器 */}
+      <MaterialSelector
+        projectId={projectId || undefined}
+        isOpen={isRegenerateMaterialSelectorOpen}
+        onClose={() => setIsRegenerateMaterialSelectorOpen(false)}
+        multiple
+        maxSelection={8}
+        onSelect={(materials) => {
+          const urls = materials.map((m) => m.url).filter(Boolean);
+          setRegenerateRefImageUrls((prev) => {
+            const merged = [...prev];
+            urls.forEach((u) => {
+              if (u && !merged.includes(u)) merged.push(u);
+            });
+            return merged;
+          });
+        }}
+      />
       <ToastContainer />
       {ConfirmDialog}
       
@@ -1716,30 +1995,54 @@ export const SlidePreview: React.FC = () => {
         title="更换模板"
         size="lg"
       >
-        <div className="space-y-4">
-          <p className="text-sm text-gray-600 mb-4">
-            选择一个新的模板将应用到后续PPT页面生成（不影响已经生成的页面）。你可以选择预设模板、已有模板或上传新模板。
-          </p>
-          <TemplateSelector
-            onSelect={handleTemplateSelect}
-            selectedTemplateId={selectedTemplateId}
-            selectedPresetTemplateId={selectedPresetTemplateId}
-            showUpload={false} // 在预览页面上传的模板直接应用到项目，不上传到用户模板库
-            projectId={projectId || null}
-          />
-          {isUploadingTemplate && (
-            <div className="text-center py-2 text-sm text-gray-500">
-              正在上传模板...
+        <div className="flex flex-col max-h-[70vh]">
+          <div className="shrink-0">
+            <p className="text-sm text-gray-600 mb-4">
+              选择一个新的模板将应用到后续PPT页面生成（不影响已经生成的页面）。你可以选择预设模板、已有模板或上传新模板。
+            </p>
+          </div>
+
+          {/* 中间区域可滚动，避免底部按钮被内容“顶下去/遮挡” */}
+          <div className="flex-1 overflow-y-auto pr-1">
+            <TemplateSelector
+              onSelect={handleTemplateSelect}
+              selectedTemplateId={selectedTemplateId}
+              selectedPresetTemplateId={selectedPresetTemplateId}
+              showUpload={false} // 在预览页面上传的模板直接应用到项目，不上传到用户模板库
+              projectId={projectId || null}
+              templateVariants={currentProject?.template_variants}
+              templateVariantsHistory={currentProject?.template_variants_history}
+              onTemplatesGenerated={async () => {
+                if (projectId) {
+                  await syncProject(projectId);
+                }
+              }}
+            />
+          </div>
+
+          {/* 底部操作区固定可见 */}
+          <div className="shrink-0 pt-4 border-t">
+            {(isUploadingTemplate || isClearingTemplate) && (
+              <div className="text-center pb-3 text-sm text-gray-500">
+                {isUploadingTemplate ? '正在上传模板...' : '正在取消模板...'}
+              </div>
+            )}
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="secondary"
+                onClick={handleClearTemplate}
+                disabled={isUploadingTemplate || isClearingTemplate || !hasTemplateResource}
+              >
+                取消当前模板
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => setIsTemplateModalOpen(false)}
+                disabled={isUploadingTemplate || isClearingTemplate}
+              >
+                关闭
+              </Button>
             </div>
-          )}
-          <div className="flex justify-end gap-3 pt-4 border-t">
-            <Button
-              variant="ghost"
-              onClick={() => setIsTemplateModalOpen(false)}
-              disabled={isUploadingTemplate}
-            >
-              关闭
-            </Button>
           </div>
         </div>
       </Modal>
@@ -1765,6 +2068,7 @@ export const SlidePreview: React.FC = () => {
             onClose={() => setIsProjectSettingsOpen(false)}
             extraRequirements={extraRequirements}
             templateStyle={templateStyle}
+            templateUsageMode={templateUsageMode}
             onExtraRequirementsChange={(value) => {
               isEditingRequirements.current = true;
               setExtraRequirements(value);
@@ -1773,6 +2077,7 @@ export const SlidePreview: React.FC = () => {
               isEditingTemplateStyle.current = true;
               setTemplateStyle(value);
             }}
+            onTemplateUsageModeChange={setTemplateUsageMode}
             onSaveExtraRequirements={handleSaveExtraRequirements}
             onSaveTemplateStyle={handleSaveTemplateStyle}
             isSavingRequirements={isSavingRequirements}

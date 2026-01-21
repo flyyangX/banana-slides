@@ -139,12 +139,13 @@ export const MaterialSelector: React.FC<MaterialSelectorProps> = ({
   };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
 
     // 验证文件类型
     const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 'image/bmp', 'image/svg+xml'];
-    if (!allowedTypes.includes(file.type)) {
+    const invalidFiles = files.filter((item) => !allowedTypes.includes(item.type));
+    if (invalidFiles.length > 0) {
       show({ message: '不支持的图片格式', type: 'error' });
       return;
     }
@@ -156,14 +157,18 @@ export const MaterialSelector: React.FC<MaterialSelectorProps> = ({
         ? null
         : filterProjectId;
 
-      const response = await uploadMaterial(
-        file,
-        targetProjectId
+      const results = await Promise.allSettled(
+        files.map((item) => uploadMaterial(item, targetProjectId))
       );
-      
-      if (response.data) {
-        show({ message: '素材上传成功', type: 'success' });
+      const successCount = results.filter((result) => result.status === 'fulfilled' && result.value?.data).length;
+      const failedCount = results.length - successCount;
+
+      if (successCount > 0) {
+        show({ message: `素材上传成功 ${successCount} 个`, type: 'success' });
         loadMaterials(); // 重新加载素材列表
+      }
+      if (failedCount > 0) {
+        show({ message: `素材上传失败 ${failedCount} 个`, type: 'error' });
       }
     } catch (error: any) {
       console.error('上传素材失败:', error);
@@ -309,6 +314,7 @@ export const MaterialSelector: React.FC<MaterialSelectorProps> = ({
                 <input
                   type="file"
                   accept="image/*"
+                  multiple
                   onChange={handleUpload}
                   className="hidden"
                   disabled={isUploading}

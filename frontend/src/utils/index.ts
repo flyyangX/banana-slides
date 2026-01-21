@@ -17,6 +17,8 @@ export function normalizeProject(data: any): Project {
     ...data,
     id: data.project_id || data.id,
     template_image_path: data.template_image_url || data.template_image_path,
+    template_variants: data.template_variants || {},
+    template_variants_history: data.template_variants_history || {},
     pages: (data.pages || []).map(normalizePage),
   };
 }

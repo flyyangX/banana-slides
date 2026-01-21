@@ -1,6 +1,9 @@
 // 页面状态
 export type PageStatus = 'DRAFT' | 'DESCRIPTION_GENERATED' | 'GENERATING' | 'COMPLETED' | 'FAILED';
 
+// 页面类型
+export type PageType = 'auto' | 'cover' | 'content' | 'transition' | 'ending';
+
 // 项目状态
 export type ProjectStatus = 'DRAFT' | 'OUTLINE_GENERATED' | 'DESCRIPTIONS_GENERATED' | 'COMPLETED';
 
@@ -42,6 +45,7 @@ export interface Page {
   part?: string; // 章节名
   outline_content: OutlineContent;
   description_content?: DescriptionContent;
+  page_type?: PageType;
   generated_image_url?: string; // 后端返回 generated_image_url
   generated_image_path?: string; // 前端使用的别名
   status: PageStatus;
@@ -67,6 +71,8 @@ export interface Project {
   creation_type?: string;
   template_image_url?: string; // 后端返回 template_image_url
   template_image_path?: string; // 前端使用的别名
+  template_variants?: Record<string, string>;
+  template_variants_history?: Record<string, string[]>;
   template_style?: string; // 风格描述文本（无模板图模式）
   // 导出设置
   export_extractor_method?: ExportExtractorMethod; // 组件提取方法
@@ -78,7 +84,7 @@ export interface Project {
 }
 
 // 任务状态
-export type TaskStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type TaskStatus = 'PENDING' | 'PROCESSING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'PARTIAL';
 
 // 任务信息
 export interface Task {

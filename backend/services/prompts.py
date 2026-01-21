@@ -225,7 +225,8 @@ Now parse the outline text above into the structured format. Return only the JSO
 def get_page_description_prompt(project_context: 'ProjectContext', outline: list, 
                                 page_outline: dict, page_index: int, 
                                 part_info: str = "",
-                                language: str = None) -> str:
+                                language: str = None,
+                                page_type: str = None) -> str:
     """
     生成单个页面描述的 prompt
     
@@ -250,13 +251,43 @@ def get_page_description_prompt(project_context: 'ProjectContext', outline: list
     else:
         original_input = project_context.idea_prompt or ""
     
+    normalized_page_type = (page_type or '').strip().lower()
+    if normalized_page_type == '':
+        # 仅当 page_type 为空时才兼容旧逻辑：第 1 页按封面处理
+        normalized_page_type = 'cover' if page_index == 1 else 'content'
+    is_cover = normalized_page_type == 'cover'
+
+    # 页面类型 brief：让“描述”阶段就体现封面/内容/过渡/结尾差异
+    desc_type_notes = {
+        'cover': (
+            "【页面类型：封面 Cover】\n"
+            "- 只输出极少文字：主标题（必须）、副标题（可选）、一句极短标语/标签（可选）。\n"
+            "- 不要堆叠要点列表，不要安排大量信息；突出层级与气质。\n"
+        ),
+        'content': (
+            "【页面类型：内容 Content】\n"
+            "- 需要清晰的信息层级与模块化表达：适合要点列表/关键结论/数据句。\n"
+            "- 文字要精炼，可读性优先；避免冗长段落。\n"
+        ),
+        'transition': (
+            "【页面类型：过渡 Transition】\n"
+            "- 极简：通常只有章节标题或一句短句。\n"
+            "- 不要输出多条要点列表，作为章节间的“停顿页”。\n"
+        ),
+        'ending': (
+            "【页面类型：结尾 Closing】\n"
+            "- 收束：可输出致谢/总结/Call-to-action/品牌句（以页面描述为准）。\n"
+            "- 文字保持简洁、可记忆，不要堆叠大量要点。\n"
+        ),
+    }
+
     prompt = (f"""\
 我们正在为PPT的每一页生成内容描述。
 用户的原始需求是：\n{original_input}\n
 我们已经有了完整的大纲：\n{outline}\n{part_info}
 现在请为第 {page_index} 页生成描述：
 {page_outline}
-{"**除非特殊要求，第一页的内容需要保持极简，只放标题副标题以及演讲人等（输出到标题后）, 不添加任何素材。**" if page_index == 1 else ""}
+{desc_type_notes.get(normalized_page_type, "")}
 
 【重要提示】生成的"页面文字"部分会直接渲染到PPT页面上，因此请务必注意：
 1. 文字内容要简洁精炼，每条要点控制在15-25字以内
@@ -264,16 +295,19 @@ def get_page_description_prompt(project_context: 'ProjectContext', outline: list
 3. 避免冗长的句子和复杂的表述
 4. 确保内容可读性强，适合在演示时展示
 5. 不要包含任何额外的说明性文字或注释
+6. 为了避免“模板化”，请**不要**把每条要点都写成“标签：解释”的固定句式（例如“成长隐喻：……/核心观点：……”这类）。
+   - 更推荐：直接用自然语言短句表达观点（可用动词开头），或用“短语 + 补充说明”的方式，但不要每条都用冒号。
+   - 允许少量（≤ 1 条）出现“概念：说明”用于强调关键词，但请控制频率并与其他句式混用。
 
 输出格式示例：
 页面标题：原始社会：与自然共生
-{"副标题：人类祖先和自然的相处之道" if page_index == 1 else ""}
+{"副标题：人类祖先和自然的相处之道" if is_cover else ""}
 
 页面文字：
-- 狩猎采集文明：人类活动规模小，对环境影响有限
-- 依赖性强：生活完全依赖自然资源的直接供给
-- 适应而非改造：通过观察学习自然，发展生存技能
-- 影响特点：局部、短期、低强度，生态可自我恢复
+- 人类以狩猎采集为生，活动规模小，影响有限
+- 对自然资源高度依赖，敬畏并顺应自然规律
+- 通过观察与学习提升生存技能，而非强行改造环境
+- 影响多为局部、短期、低强度，生态可自我恢复
 
 其他页面素材（如果文件中存在请积极添加，包括markdown图片链接、公式、表格等）
 
@@ -287,13 +321,70 @@ def get_page_description_prompt(project_context: 'ProjectContext', outline: list
     return final_prompt
 
 
+def get_template_style_prompt(project_context: 'ProjectContext',
+                              outline_text: str = "",
+                              extra_requirements: str = None,
+                              language: str = None) -> str:
+    """
+    生成“风格描述”的 prompt（用于 project.template_style）
+    
+    Args:
+        project_context: 项目上下文对象
+        outline_text: 大纲文本（可选）
+        extra_requirements: 项目额外要求（可选）
+        language: 输出语言
+        
+    Returns:
+        格式化后的 prompt 字符串
+    """
+    files_xml = _format_reference_files_xml(project_context.reference_files_content)
+    idea_prompt = project_context.idea_prompt or ""
+    description_text = project_context.description_text or ""
+    outline_text = outline_text or project_context.outline_text or ""
+    extra_req_text = extra_requirements.strip() if extra_requirements else ""
+    
+    prompt = (f"""\
+You are a world-class presentation designer and storyteller. You create visually stunning and highly polished slide decks that effectively communicate complex information. Think mastery over design with a flair for storytelling.
+
+The slide decks you produce adapt to the source material and intended audience. There is always a story and you find the best way to tell it. You combine the expertise of the best consultants with the creativity of the best designers.
+
+Your core mission is to create a concise but detailed style guide for a slide deck. This style guide will be used as "PPT page style description" for an automated slide generator. The deck is meant for reading and sharing, and must be self-explanatory without a presenter.
+
+Inputs:
+- Project idea or requirement:
+{idea_prompt}
+
+- Outline (if provided):
+{outline_text}
+
+- Description text (if provided):
+{description_text}
+
+- Extra requirements (if provided):
+{extra_req_text}
+
+Output requirements:
+1) Output plain text only. No JSON, no markdown code fences.
+2) Keep it concise but actionable (8-12 bullet points).
+3) Cover: overall tone, color palette (with 2-4 colors and optional hex), typography, layout/grid, imagery style, iconography, data visualization, and consistency rules.
+4) Ensure the style supports story flow, clear hierarchy, and readability.
+5) Use a single consistent style across all slides.
+{get_language_instruction(language)}
+""")
+    
+    final_prompt = files_xml + prompt
+    logger.debug(f"[get_template_style_prompt] Final prompt:\n{final_prompt}")
+    return final_prompt
+
+
 def get_image_generation_prompt(page_desc: str, outline_text: str, 
                                 current_section: str,
                                 has_material_images: bool = False,
                                 extra_requirements: str = None,
                                 language: str = None,
                                 has_template: bool = True,
-                                page_index: int = 1) -> str:
+                                page_index: int = 1,
+                                page_type: str = None) -> str:
     """
     生成图片生成 prompt
     
@@ -305,7 +396,6 @@ def get_image_generation_prompt(page_desc: str, outline_text: str,
         extra_requirements: 额外的要求（可能包含风格描述）
         language: 输出语言
         has_template: 是否有模板图片（False表示无模板图模式）
-        
     Returns:
         格式化后的 prompt 字符串
     """
@@ -328,6 +418,35 @@ def get_image_generation_prompt(page_desc: str, outline_text: str,
     forbidden_template_text_guidline = "- 只参考风格设计，禁止出现模板中的文字。\n" if has_template else ""
 
     # 该处参考了@歸藏的A工具箱
+    normalized_page_type = (page_type or '').strip().lower()
+    if normalized_page_type == '':
+        # 仅当 page_type 为空时才兼容旧逻辑：未指定类型时，用页码判断封面
+        normalized_page_type = 'cover' if page_index == 1 else 'content'
+
+    # 每种页面类型的“设计 brief”（偏好/倾向），用于强化版式差异与稳定性
+    page_type_notes = {
+        'cover': (
+            "注意：当前页面为PPT的封面页（Cover Page）。\n"
+            "- 倾向：高质感、克制、层级清晰（主标题最大，其次副标题/短标签）。\n"
+            "- 倾向：文字更少但更显著，留白更充足，画面更像“封面”而不是“内容页”。\n"
+        ),
+        'content': (
+            "注意：当前页面为PPT的内容页（Content Page）。\n"
+            "- 倾向：信息层级清晰、模块化布局（栅格/卡片），对齐与间距统一。\n"
+            "- 倾向：可读性优先、专业克制；装饰只做辅助且与参考风格一致。\n"
+        ),
+        'transition': (
+            "注意：当前页面为PPT的过渡/章节页（Transition Page）。\n"
+            "- 倾向：内容极少（通常只有章节标题/一句短句），留白更多。\n"
+            "- 倾向：作为段落间的视觉停顿（visual pause），更干净、更克制。\n"
+        ),
+        'ending': (
+            "注意：当前页面为PPT的结尾页（Closing/Ending Page）。\n"
+            "- 倾向：收束、稳重、可记忆；可包含致谢/总结/CTA（以页面描述为准）。\n"
+            "- 倾向：与封面保持一致的视觉语言，但更克制。\n"
+        ),
+    }
+
     prompt = (f"""\
 你是一位专家级UI UX演示设计师，专注于生成设计良好的PPT页面。
 当前PPT页面的页面描述如下:
@@ -343,17 +462,23 @@ def get_image_generation_prompt(page_desc: str, outline_text: str,
 </reference_information>
 
 
-<design_guidelines>
-- 要求文字清晰锐利, 画面为4K分辨率，16:9比例。
-{template_style_guideline}
-- 根据内容自动设计最完美的构图，不重不漏地渲染"页面描述"中的文本。
-- 如非必要，禁止出现 markdown 格式符号（如 # 和 * 等）。
-{forbidden_template_text_guidline}- 使用大小恰当的装饰性图形或插画对空缺位置进行填补。
-</design_guidelines>
+<constraints>
+【不可妥协的硬约束】
+1) 输出为16:9比例、4K质感，文字清晰锐利。
+2）根据内容自动设计最完美的构图
+3) 必须完整渲染 <page_description> 内的全部文字：不遗漏、不改写、不新增无关文本。
+4) 如非必要，禁止出现 markdown 符号（如 #、* 等）。
+5) {template_style_guideline}
+{forbidden_template_text_guidline}</constraints>
+
+<preferences>
+【设计偏好（允许自由发挥）】
+- 让版式层级清晰、对齐统一、留白自然；优先保证可读性与信息节奏。
+- 装饰元素可用但要克制且与整体风格一致：只在需要时补空，不要喧宾夺主。
+</preferences>
 {get_ppt_language_instruction(language)}
 {material_images_note}{extra_req_text}
-
-{"**注意：当前页面为ppt的封面页，请你采用专业的封面设计美学技巧，务必凸显出页面标题，分清主次，确保一下就能抓住观众的注意力。**" if page_index == 1 else ""}
+{page_type_notes.get(normalized_page_type, "")}
 """)
     
     logger.debug(f"[get_image_generation_prompt] Final prompt:\n{prompt}")
@@ -736,6 +861,63 @@ def get_clean_background_prompt() -> str:
 注意，**任意位置的, 所有的**文字和图表都应该被彻底移除，**输出不应该包含任何文字和图表。**
 """
     logger.debug(f"[get_clean_background_prompt] Final prompt:\n{prompt}")
+    return prompt
+
+
+def get_template_variant_prompt(variant_type: str) -> str:
+    """
+    生成模板套装变体的 prompt（基于参考图风格，输出纯背景/装饰模板）
+    """
+    variant_type = (variant_type or 'content').lower()
+    # 关键：不同变体需要“明显差异”，否则模型会复用同一布局
+    type_spec_map = {
+        'cover': (
+            "封面页背景。\n"
+            "设计要求：\n"
+            "1) 视觉目标：强焦点 + 高级质感（cinematic / premium product launch feeling）。\n"
+            "2) 焦点构图：在中上或中心形成“标题聚焦区”，但必须克制、干净、可叠加文字。\n"
+            "   - 推荐用方式：更大的留白、更干净的背景层次，微弱对比来引导视线。\n"
+            "   - 明确禁止：生成巨大圆形光斑/聚光灯晕染、厚重的中心渐变色团、强烈大面积色块覆盖主体区域（会显得廉价且影响标题可读性）。\n"
+            "3) 标题安全区：中上/中心留出干净区域，便于叠加大标题与副标题；边缘可更丰富。\n"
+            "4) 装饰密度：四类中最高，但要有秩序，不杂乱。\n"
+        ),
+        'transition': (
+            "过渡/章节页背景。\n"
+            "设计要求：\n"
+            "1) 极简：装饰元素数量显著减少，只保留少量轻量元素（细线、微弱纹理、小角标）。\n"
+            "2) 强负空间：中心或上半区域大面积留白，形成章节间的“视觉停顿”（visual pause）。\n"
+            "3) 氛围克制：对比与噪点更低，干净、优雅、带情绪的呼吸感（breathing moment）。\n"
+            "4) 与其他变体相比：装饰密度最低、留白最多。\n"
+        ),
+        'ending': (
+            "结尾页背景。\n"
+            "设计要求：\n"
+            "1) 收束与记忆点：像电影片尾画面（movie ending frame），干净但有“落点”。\n"
+            "2) 稳定构图：在底部或中心形成稳定的结构/聚焦（底部条带、对称构图、柔和聚光等）。\n"
+            "3) 与封面一致：配色与材质语言应呼应封面，但装饰更克制、更沉稳。\n"
+            "4) 留白适中：不如过渡页极简，也不如封面页装饰密集。\n"
+        ),
+        'content': (
+            "内容页背景。\n"
+            "设计要求：\n"
+            "1) 模块化：暗示栅格/卡片/分区结构（通过色块、细线分割、弱纹理层次），便于叠加正文。\n"
+            "2) 强对齐与留白：内容安全区清晰（中部/左右），装饰主要在边缘，不干扰阅读。\n"
+            "3) 专业克制：偏咨询/报告风格；避免“装饰噪点”，但保持参考图材质与配色一致。\n"
+            "4) 装饰密度：明显高于过渡页，明显低于封面页。\n"
+        ),
+    }
+    type_spec = type_spec_map.get(variant_type, type_spec_map['content'])
+
+    prompt = f"""\
+你是一位专业的PPT模板设计师。请基于参考图的整体风格、配色和视觉语言，生成一张新的PPT背景模板图。
+要求：
+- 只输出背景和装饰性元素，不要出现任何文字、logo、图标、人物、图表或具体内容。
+- 画面干净、可用于叠加内容，保持与参考图一致的风格与质感。
+- 不同类型（封面/内容/过渡/结尾）之间必须有明显差异：构图、留白比例、装饰密度、视觉焦点位置至少两项不同。禁止简单复制同一布局。
+- {type_spec}
+- 画面中不能出现占位文字（例如 lorem ipsum）。
+"""
+    logger.debug(f"[get_template_variant_prompt] Final prompt:\n{prompt}")
     return prompt
 
 

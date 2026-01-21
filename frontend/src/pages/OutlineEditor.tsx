@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
-import { ArrowLeft, Save, ArrowRight, Plus, FileText, Sparkle, Download } from 'lucide-react';
+import { ArrowLeft, Save, ArrowRight, Plus, FileText, Sparkle, Download, ImagePlus } from 'lucide-react';
 import {
   DndContext,
   closestCenter,
@@ -29,6 +29,7 @@ import type { Page } from '@/types';
 const SortableCard: React.FC<{
   page: Page;
   index: number;
+  totalPages: number;
   onUpdate: (data: Partial<Page>) => void;
   onDelete: () => void;
   onClick: () => void;
@@ -221,6 +222,15 @@ export const OutlineEditor: React.FC = () => {
               <span className="hidden lg:inline">保存</span>
             </Button>
             <Button
+              variant="ghost"
+              size="sm"
+              icon={<ImagePlus size={16} className="md:w-[18px] md:h-[18px]" />}
+              onClick={() => navigate(`/project/${projectId}/materials`)}
+              className="hidden md:inline-flex"
+            >
+              <span className="hidden lg:inline">素材库</span>
+            </Button>
+            <Button
               variant="primary"
               size="sm"
               icon={<ArrowRight size={16} className="md:w-[18px] md:h-[18px]" />}
@@ -359,6 +369,7 @@ export const OutlineEditor: React.FC = () => {
                         key={page.id || `page-${index}`}
                         page={page}
                         index={index}
+                        totalPages={currentProject.pages.length}
                         onUpdate={(data) => page.id && updatePageLocal(page.id, data)}
                         onDelete={() => page.id && deletePageById(page.id)}
                         onClick={() => setSelectedPageId(page.id || null)}

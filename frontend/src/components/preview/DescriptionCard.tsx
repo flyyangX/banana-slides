@@ -1,12 +1,15 @@
 import React, { useState } from 'react';
-import { Edit2, FileText, RefreshCw } from 'lucide-react';
-import { Card, ContextualStatusBadge, Button, Modal, Textarea, Skeleton, Markdown } from '@/components/shared';
+import { Edit2, FileText, ImagePlus, RefreshCw } from 'lucide-react';
+import { Card, ContextualStatusBadge, Button, Modal, Textarea, Skeleton, Markdown, MaterialSelector, useToast } from '@/components/shared';
 import { useDescriptionGeneratingState } from '@/hooks/useGeneratingState';
-import type { Page, DescriptionContent } from '@/types';
+import type { Page, PageType, DescriptionContent } from '@/types';
+import type { Material } from '@/api/endpoints';
 
 export interface DescriptionCardProps {
   page: Page;
   index: number;
+  totalPages: number;
+  projectId?: string | null;
   onUpdate: (data: Partial<Page>) => void;
   onRegenerate: () => void;
   isGenerating?: boolean;
@@ -16,11 +19,16 @@ export interface DescriptionCardProps {
 export const DescriptionCard: React.FC<DescriptionCardProps> = ({
   page,
   index,
+  totalPages,
+  projectId,
   onUpdate,
   onRegenerate,
   isGenerating = false,
   isAiRefining = false,
 }) => {
+  const { show } = useToast();
+  const MATERIAL_SECTION_TITLE = '其他页面素材：';
+
   // 从 description_content 提取文本内容
   const getDescriptionText = (descContent: DescriptionContent | undefined): string => {
     if (!descContent) return '';
@@ -36,6 +44,7 @@ export const DescriptionCard: React.FC<DescriptionCardProps> = ({
   
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
+  const [isMaterialSelectorOpen, setIsMaterialSelectorOpen] = useState(false);
   
   // 使用专门的描述生成状态 hook，不受图片生成状态影响
   const generating = useDescriptionGeneratingState(isGenerating, isAiRefining);
@@ -57,6 +66,96 @@ export const DescriptionCard: React.FC<DescriptionCardProps> = ({
     setIsEditing(false);
   };
 
+  const pageTypeLabels: Record<PageType, string> = {
+    auto: '自动',
+    cover: '封面',
+    content: '内容',
+    transition: '过渡',
+    ending: '结尾',
+  };
+
+  const inferPageType = () => {
+    const title = page.outline_content?.title || '';
+    const titleLower = title.toLowerCase();
+    const transitionKeywords = ['过渡', '章节', '部分', '目录', '篇章', 'section', 'part', 'agenda', 'outline', 'overview'];
+    const endingKeywords = ['结尾', '总结', '致谢', '谢谢', 'ending', 'summary', 'thanks', 'q&a', 'qa', '结论', '回顾'];
+
+    if (index === 0) {
+      return { type: 'cover' as PageType, reason: '第 1 页默认封面' };
+    }
+    if (totalPages > 0 && index === totalPages - 1) {
+      return { type: 'ending' as PageType, reason: '最后一页默认结尾' };
+    }
+    if (transitionKeywords.some((keyword) => titleLower.includes(keyword))) {
+      return { type: 'transition' as PageType, reason: `标题包含关键词：${title}` };
+    }
+    if (endingKeywords.some((keyword) => titleLower.includes(keyword))) {
+      return { type: 'ending' as PageType, reason: `标题包含关键词：${title}` };
+    }
+    return { type: 'content' as PageType, reason: '默认内容页' };
+  };
+
+  const currentType = (page.page_type || 'auto') as PageType;
+  const inferred = inferPageType();
+  const displayType = currentType === 'auto' ? inferred.type : currentType;
+  const displayReason = currentType === 'auto' ? inferred.reason : '已手动指定页面类型';
+
+  const getMaterialDisplayName = (material: Material): string =>
+    material.prompt?.trim() ||
+    material.name?.trim() ||
+    material.original_filename?.trim() ||
+    material.source_filename?.trim() ||
+    material.filename ||
+    material.url;
+
+  const sanitizeAltText = (textValue: string): string =>
+    textValue.replace(/[[\]]/g, '').trim() || '素材';
+
+  const buildMaterialsMarkdown = (materials: Material[]): string =>
+    materials
+      .map((material) => {
+        const alt = sanitizeAltText(getMaterialDisplayName(material));
+        return `![${alt}](${material.url})`;
+      })
+      .join('\n');
+
+  const updateDescriptionWithMaterials = (currentText: string, materials: Material[]): string => {
+    const materialsMarkdown = buildMaterialsMarkdown(materials);
+    const trimmedText = (currentText || '').trim();
+    const sectionRegex = new RegExp(`(^|\\n)${MATERIAL_SECTION_TITLE}\\s*\\n([\\s\\S]*?)$`);
+
+    if (sectionRegex.test(trimmedText)) {
+      return trimmedText.replace(sectionRegex, `$1${MATERIAL_SECTION_TITLE}\n${materialsMarkdown}`);
+    }
+
+    if (!trimmedText) {
+      return `${MATERIAL_SECTION_TITLE}\n${materialsMarkdown}`;
+    }
+
+    return `${trimmedText}\n\n${MATERIAL_SECTION_TITLE}\n${materialsMarkdown}`;
+  };
+
+  const getMaterialCountFromText = (currentText: string): number => {
+    const sectionRegex = new RegExp(`${MATERIAL_SECTION_TITLE}\\s*\\n([\\s\\S]*)$`);
+    const match = currentText.match(sectionRegex);
+    if (!match) return 0;
+    const sectionBody = match[1] || '';
+    const imageRegex = /!\[[^\]]*]\(([^)]+)\)/g;
+    return Array.from(sectionBody.matchAll(imageRegex)).length;
+  };
+
+  const handleSelectMaterials = (materials: Material[]) => {
+    const updatedText = updateDescriptionWithMaterials(text, materials);
+    onUpdate({
+      description_content: {
+        text: updatedText,
+      } as DescriptionContent,
+    });
+    show({ message: `已添加 ${materials.length} 个素材`, type: 'success' });
+  };
+
+  const materialCount = getMaterialCountFromText(text);
+
   return (
     <>
       <Card className="p-0 overflow-hidden flex flex-col">
@@ -70,8 +169,29 @@ export const DescriptionCard: React.FC<DescriptionCardProps> = ({
                   {page.part}
                 </span>
               )}
+              <span
+                className="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded"
+                title={displayReason}
+              >
+                {pageTypeLabels[displayType]}
+              </span>
             </div>
             <ContextualStatusBadge page={page} context="description" />
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <span className="text-xs text-gray-500">页面类型</span>
+            <select
+              value={currentType}
+              onChange={(e) => onUpdate({ page_type: e.target.value as PageType })}
+              className="text-xs border border-gray-200 rounded px-2 py-1 bg-white"
+              disabled={generating}
+            >
+              <option value="auto">自动（{pageTypeLabels[inferred.type]}）</option>
+              <option value="cover">封面</option>
+              <option value="content">内容</option>
+              <option value="transition">过渡</option>
+              <option value="ending">结尾</option>
+            </select>
           </div>
         </div>
 
@@ -99,7 +219,16 @@ export const DescriptionCard: React.FC<DescriptionCardProps> = ({
         </div>
 
         {/* 操作栏 */}
-        <div className="border-t border-gray-100 px-4 py-3 flex justify-end gap-2 mt-auto">
+        <div className="border-t border-gray-100 px-4 py-3 flex items-center justify-end gap-2 mt-auto">
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<ImagePlus size={16} />}
+            onClick={() => setIsMaterialSelectorOpen(true)}
+            disabled={generating}
+          >
+            素材图{materialCount > 0 ? `(${materialCount})` : ''}
+          </Button>
           <Button
             variant="ghost"
             size="sm"
@@ -145,6 +274,16 @@ export const DescriptionCard: React.FC<DescriptionCardProps> = ({
           </div>
         </div>
       </Modal>
+
+      {projectId && (
+        <MaterialSelector
+          projectId={projectId}
+          isOpen={isMaterialSelectorOpen}
+          onClose={() => setIsMaterialSelectorOpen(false)}
+          onSelect={handleSelectMaterials}
+          multiple={true}
+        />
+      )}
     </>
   );
 };

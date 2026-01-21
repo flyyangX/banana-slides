@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { GripVertical, Edit2, Trash2, Check, X } from 'lucide-react';
 import { Card, useConfirm, Markdown, ShimmerOverlay } from '@/components/shared';
-import type { Page } from '@/types';
+import type { Page, PageType } from '@/types';
 
 interface OutlineCardProps {
   page: Page;
   index: number;
+  totalPages: number;
   onUpdate: (data: Partial<Page>) => void;
   onDelete: () => void;
   onClick: () => void;
@@ -17,6 +18,7 @@ interface OutlineCardProps {
 export const OutlineCard: React.FC<OutlineCardProps> = ({
   page,
   index,
+  totalPages,
   onUpdate,
   onDelete,
   onClick,
@@ -28,6 +30,40 @@ export const OutlineCard: React.FC<OutlineCardProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(page.outline_content.title);
   const [editPoints, setEditPoints] = useState(page.outline_content.points.join('\n'));
+
+  const pageTypeLabels: Record<PageType, string> = {
+    auto: '自动',
+    cover: '封面',
+    content: '内容',
+    transition: '过渡',
+    ending: '结尾',
+  };
+
+  const inferPageType = () => {
+    const title = page.outline_content?.title || '';
+    const titleLower = title.toLowerCase();
+    const transitionKeywords = ['过渡', '章节', '部分', '目录', '篇章', 'section', 'part', 'agenda', 'outline', 'overview'];
+    const endingKeywords = ['结尾', '总结', '致谢', '谢谢', 'ending', 'summary', 'thanks', 'q&a', 'qa', '结论', '回顾'];
+
+    if (index === 0) {
+      return { type: 'cover' as PageType, reason: '第 1 页默认封面' };
+    }
+    if (totalPages > 0 && index === totalPages - 1) {
+      return { type: 'ending' as PageType, reason: '最后一页默认结尾' };
+    }
+    if (transitionKeywords.some((keyword) => titleLower.includes(keyword))) {
+      return { type: 'transition' as PageType, reason: `标题包含关键词：${title}` };
+    }
+    if (endingKeywords.some((keyword) => titleLower.includes(keyword))) {
+      return { type: 'ending' as PageType, reason: `标题包含关键词：${title}` };
+    }
+    return { type: 'content' as PageType, reason: '默认内容页' };
+  };
+
+  const currentType = (page.page_type || 'auto') as PageType;
+  const inferred = inferPageType();
+  const displayType = currentType === 'auto' ? inferred.type : currentType;
+  const displayReason = currentType === 'auto' ? inferred.reason : '已手动指定页面类型';
 
   // 当 page prop 变化时，同步更新本地编辑状态（如果不在编辑模式）
   useEffect(() => {
@@ -83,6 +119,12 @@ export const OutlineCard: React.FC<OutlineCardProps> = ({
                 {page.part}
               </span>
             )}
+            <span
+              className="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded"
+              title={displayReason}
+            >
+              {pageTypeLabels[displayType]}
+            </span>
           </div>
 
           {isEditing ? (
@@ -125,6 +167,21 @@ export const OutlineCard: React.FC<OutlineCardProps> = ({
               <h4 className="font-semibold text-gray-900 mb-2">
                 {page.outline_content.title}
               </h4>
+              <div className="flex items-center gap-2 mb-2">
+                <label className="text-xs text-gray-500">页面类型</label>
+                <select
+                  value={currentType}
+                  onChange={(e) => onUpdate({ page_type: e.target.value as PageType })}
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-xs border border-gray-200 rounded px-2 py-1 bg-white"
+                >
+                  <option value="auto">自动（{pageTypeLabels[inferred.type]}）</option>
+                  <option value="cover">封面</option>
+                  <option value="content">内容</option>
+                  <option value="transition">过渡</option>
+                  <option value="ending">结尾</option>
+                </select>
+              </div>
               <div className="text-gray-600">
                 <Markdown>{page.outline_content.points.join('\n')}</Markdown>
               </div>

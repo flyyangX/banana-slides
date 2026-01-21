@@ -1,6 +1,6 @@
 import React, { useEffect, useCallback, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, FileText, Sparkles, Download } from 'lucide-react';
+import { ArrowLeft, ArrowRight, FileText, Sparkles, Download, ImagePlus } from 'lucide-react';
 import { Button, Loading, useToast, useConfirm, AiRefineInput, FilePreviewModal, ProjectResourcesList } from '@/components/shared';
 import { DescriptionCard } from '@/components/preview/DescriptionCard';
 import { useProjectStore } from '@/store/useProjectStore';
@@ -187,6 +187,15 @@ export const DetailEditor: React.FC = () => {
               <span className="hidden lg:inline">上一步</span>
             </Button>
             <Button
+              variant="ghost"
+              size="sm"
+              icon={<ImagePlus size={16} className="md:w-[18px] md:h-[18px]" />}
+              onClick={() => navigate(`/project/${projectId}/materials`)}
+              className="hidden md:inline-flex"
+            >
+              <span className="hidden lg:inline">素材库</span>
+            </Button>
+            <Button
               variant="primary"
               size="sm"
               icon={<ArrowRight size={16} className="md:w-[18px] md:h-[18px]" />}
@@ -278,6 +287,8 @@ export const DetailEditor: React.FC = () => {
                     key={pageId}
                     page={page}
                     index={index}
+                    totalPages={currentProject.pages.length}
+                    projectId={projectId || null}
                     onUpdate={(data) => updatePageLocal(pageId, data)}
                     onRegenerate={() => handleRegeneratePage(pageId)}
                     isGenerating={pageId ? !!pageDescriptionGeneratingTasks[pageId] : false}

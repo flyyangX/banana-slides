@@ -2,6 +2,7 @@
 File Service - handles all file operations
 """
 import os
+import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -100,6 +101,23 @@ class FileService:
         materials_dir = self._get_project_dir(project_id) / "materials"
         materials_dir.mkdir(exist_ok=True, parents=True)
         return materials_dir
+
+    def _get_global_materials_dir(self) -> Path:
+        """Get global materials directory"""
+        materials_dir = self.upload_folder / "materials"
+        materials_dir.mkdir(exist_ok=True, parents=True)
+        return materials_dir
+
+    def _get_materials_target_dir(self, target_project_id: Optional[str]) -> Path:
+        return self._get_global_materials_dir() if target_project_id is None else self._get_materials_dir(target_project_id)
+
+    def _generate_material_filename(self, original_filename: str) -> str:
+        safe_name = secure_filename(original_filename) or "material"
+        base_name = Path(safe_name).stem
+        ext = Path(safe_name).suffix.lower() or ".png"
+        import time
+        timestamp = int(time.time() * 1000)
+        return f"{base_name}_{timestamp}{ext}"
     
     def save_template_image(self, file, project_id: str) -> str:
         """
@@ -123,6 +141,87 @@ class FileService:
         file.save(str(filepath))
         
         # Return relative path
+        return filepath.relative_to(self.upload_folder).as_posix()
+
+    def save_template_image_with_key(self, file, project_id: str, template_key: str) -> str:
+        """
+        Save template image file with template key in filename.
+
+        Args:
+            file: FileStorage object from Flask request
+            project_id: Project ID
+            template_key: Template key (templateId or content hash)
+
+        Returns:
+            Relative file path from upload folder
+        """
+        template_dir = self._get_template_dir(project_id)
+        original_filename = secure_filename(file.filename)
+        ext = original_filename.rsplit('.', 1)[1].lower() if '.' in original_filename else 'png'
+        safe_key = secure_filename(str(template_key)) or 'template'
+        filename = f"template_{safe_key}.{ext}"
+        filepath = template_dir / filename
+        file.save(str(filepath))
+        return filepath.relative_to(self.upload_folder).as_posix()
+
+    def save_template_variant_image(self, image: Image.Image, project_id: str, variant_key: str,
+                                    image_format: str = 'PNG', template_key: Optional[str] = None,
+                                    with_timestamp: bool = False) -> str:
+        """
+        Save generated template variant image.
+
+        Args:
+            image: PIL Image object
+            project_id: Project ID
+            variant_key: template type key (cover/content/transition/ending)
+            image_format: Image format (PNG, JPEG, etc.)
+
+        Returns:
+            Relative file path from upload folder
+        """
+        template_dir = self._get_template_dir(project_id)
+        ext = image_format.lower()
+        suffix = ""
+        if with_timestamp:
+            import time
+            suffix = f"_{int(time.time() * 1000)}"
+        if template_key:
+            safe_key = secure_filename(str(template_key)) or 'template'
+            filename = f"template_{safe_key}_{variant_key}{suffix}.{ext}"
+        else:
+            filename = f"template_{variant_key}{suffix}.{ext}"
+        filepath = template_dir / filename
+        image.save(str(filepath))
+        return filepath.relative_to(self.upload_folder).as_posix()
+
+    def save_template_variant_upload(self, file, project_id: str, variant_key: str,
+                                     template_key: Optional[str] = None,
+                                     with_timestamp: bool = False) -> str:
+        """
+        Save uploaded template variant image (from user).
+
+        Args:
+            file: FileStorage object from Flask request
+            project_id: Project ID
+            variant_key: template type key (cover/content/transition/ending)
+
+        Returns:
+            Relative file path from upload folder
+        """
+        template_dir = self._get_template_dir(project_id)
+        original_filename = secure_filename(file.filename)
+        ext = original_filename.rsplit('.', 1)[1].lower() if '.' in original_filename else 'png'
+        suffix = ""
+        if with_timestamp:
+            import time
+            suffix = f"_{int(time.time() * 1000)}"
+        if template_key:
+            safe_key = secure_filename(str(template_key)) or 'template'
+            filename = f"template_{safe_key}_{variant_key}{suffix}.{ext}"
+        else:
+            filename = f"template_{variant_key}{suffix}.{ext}"
+        filepath = template_dir / filename
+        file.save(str(filepath))
         return filepath.relative_to(self.upload_folder).as_posix()
     
     def save_generated_image(self, image: Image.Image, project_id: str,
@@ -232,11 +331,7 @@ class FileService:
             Relative file path from upload folder
         """
         # Handle global materials (project_id is None)
-        if project_id is None:
-            materials_dir = self.upload_folder / "materials"
-            materials_dir.mkdir(exist_ok=True, parents=True)
-        else:
-            materials_dir = self._get_materials_dir(project_id)
+        materials_dir = self._get_materials_target_dir(project_id)
 
         # Use lowercase extension
         ext = image_format.lower()
@@ -253,6 +348,37 @@ class FileService:
 
         # Return relative path
         return filepath.relative_to(self.upload_folder).as_posix()
+
+    def copy_material_file(self, relative_path: str, target_project_id: Optional[str]) -> tuple[str, str]:
+        """
+        Copy a material file to target project (or global) and return new relative path and filename.
+        """
+        source_path = self.upload_folder / relative_path.replace('\\', '/')
+        if not source_path.exists():
+            raise FileNotFoundError(f"Material file not found: {relative_path}")
+
+        target_dir = self._get_materials_target_dir(target_project_id)
+        new_filename = self._generate_material_filename(source_path.name)
+        target_path = target_dir / new_filename
+        shutil.copy2(source_path, target_path)
+        return target_path.relative_to(self.upload_folder).as_posix(), new_filename
+
+    def move_material_file(self, relative_path: str, target_project_id: Optional[str]) -> tuple[str, str]:
+        """
+        Move a material file to target project (or global) and return new relative path and filename.
+        """
+        source_path = self.upload_folder / relative_path.replace('\\', '/')
+        if not source_path.exists():
+            raise FileNotFoundError(f"Material file not found: {relative_path}")
+
+        target_dir = self._get_materials_target_dir(target_project_id)
+        if source_path.parent == target_dir:
+            return relative_path, source_path.name
+
+        new_filename = self._generate_material_filename(source_path.name)
+        target_path = target_dir / new_filename
+        shutil.move(str(source_path), str(target_path))
+        return target_path.relative_to(self.upload_folder).as_posix(), new_filename
     
     def delete_page_image_version(self, image_path: str) -> bool:
         """

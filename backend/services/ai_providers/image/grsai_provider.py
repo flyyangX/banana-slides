@@ -11,6 +11,7 @@ from typing import Optional, List
 from PIL import Image
 
 from .base import ImageProvider
+from config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +65,18 @@ class GRSAIImageProvider(ImageProvider):
         logger.info(f"GRSAI ImageProvider initialized - api_base={self.api_base}, model={self.model}")
     
     def _image_to_base64(self, image: Image.Image) -> str:
-        """Convert PIL Image to base64 string"""
+        """Convert PIL Image to base64 string (JPEG compress, no resize)"""
         buffered = BytesIO()
-        image.save(buffered, format="PNG")
+        # Convert to RGB to ensure JPEG compatibility
+        if image.mode in ("RGBA", "LA"):
+            background = Image.new("RGB", image.size, (255, 255, 255))
+            background.paste(image, mask=image.split()[-1])
+            image = background
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+
+        quality = get_config().REF_IMAGE_JPEG_QUALITY
+        image.save(buffered, format="JPEG", quality=quality, optimize=True, progressive=True)
         img_bytes = buffered.getvalue()
         return base64.b64encode(img_bytes).decode('utf-8')
     
@@ -120,9 +130,9 @@ class GRSAIImageProvider(ImageProvider):
             # Add reference images if provided
             if ref_images and len(ref_images) > 0:
                 request_body["urls"] = []
-                for img in ref_images[:3]:  # Max 3 reference images
+                for img in ref_images:
                     base64_str = self._image_to_base64(img)
-                    request_body["urls"].append(f"data:image/png;base64,{base64_str}")
+                    request_body["urls"].append(f"data:image/jpeg;base64,{base64_str}")
             
             logger.info(f"Calling GRSAI API - model={self.model}, aspectRatio={grsai_aspect_ratio}, imageSize={grsai_resolution}")
             

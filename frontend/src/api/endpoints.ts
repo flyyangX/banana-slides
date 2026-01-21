@@ -31,14 +31,46 @@ export const createProject = async (data: CreateProjectRequest): Promise<ApiResp
  */
 export const uploadTemplate = async (
   projectId: string,
-  templateImage: File
+  templateImage: File,
+  templateKey?: string
 ): Promise<ApiResponse<{ template_image_url: string }>> => {
   const formData = new FormData();
   formData.append('template_image', templateImage);
+  if (templateKey) {
+    formData.append('template_key', templateKey);
+  }
 
   const response = await apiClient.post<ApiResponse<{ template_image_url: string }>>(
     `/api/projects/${projectId}/template`,
     formData
+  );
+  return response.data;
+};
+
+/**
+ * 清除项目模板
+ */
+export const deleteTemplate = async (projectId: string): Promise<ApiResponse> => {
+  const response = await apiClient.delete<ApiResponse>(`/api/projects/${projectId}/template`);
+  return response.data;
+};
+
+/**
+ * 生成模板套装
+ */
+export const generateTemplateVariants = async (
+  projectId: string,
+  types: string[],
+  options?: { extraRequirements?: string }
+): Promise<ApiResponse<{ task_id: string; status: string; total: number }>> => {
+  const response = await apiClient.post<ApiResponse<{ task_id: string; status: string; total: number }>>(
+    `/api/projects/${projectId}/templates/generate`,
+    {
+      types,
+      ...(options?.extraRequirements && options.extraRequirements.trim()
+        ? { extra_requirements: options.extraRequirements }
+        : {}),
+    }
   );
   return response.data;
 };
@@ -239,12 +271,56 @@ export const generatePageImage = async (
   projectId: string,
   pageId: string,
   forceRegenerate: boolean = false,
-  language?: OutputLanguage
+  language?: OutputLanguage,
+  options?: {
+    useTemplate?: boolean;
+    extraRequirements?: string;
+    refImageUrls?: string[]; // /files/... 或 http(s)...
+    uploadedFiles?: File[];
+  }
 ): Promise<ApiResponse> => {
   const lang = language || await getStoredOutputLanguage();
+  const useTemplate = options?.useTemplate;
+  const extraRequirements = options?.extraRequirements;
+  const refImageUrls = options?.refImageUrls;
+
+  // 如果有上传文件，用 multipart/form-data
+  if (options?.uploadedFiles && options.uploadedFiles.length > 0) {
+    const formData = new FormData();
+    formData.append('force_regenerate', String(forceRegenerate));
+    formData.append('language', lang);
+    if (useTemplate !== undefined) {
+      formData.append('use_template', String(useTemplate));
+    }
+    if (extraRequirements && extraRequirements.trim()) {
+      formData.append('extra_requirements', extraRequirements);
+    }
+    if (refImageUrls && refImageUrls.length > 0) {
+      formData.append('ref_image_urls', JSON.stringify(refImageUrls));
+    }
+    options.uploadedFiles.forEach((file) => {
+      formData.append('context_images', file);
+    });
+
+    const response = await apiClient.post<ApiResponse>(
+      `/api/projects/${projectId}/pages/${pageId}/generate/image`,
+      formData
+    );
+    return response.data;
+  }
+
+  // 否则用 JSON
   const response = await apiClient.post<ApiResponse>(
     `/api/projects/${projectId}/pages/${pageId}/generate/image`,
-    { force_regenerate: forceRegenerate, language: lang }
+    {
+      force_regenerate: forceRegenerate,
+      language: lang,
+      ...(useTemplate !== undefined ? { use_template: useTemplate } : {}),
+      ...(extraRequirements && extraRequirements.trim()
+        ? { extra_requirements: extraRequirements }
+        : {}),
+      ...(refImageUrls && refImageUrls.length > 0 ? { ref_image_urls: refImageUrls } : {}),
+    }
   );
   return response.data;
 };
@@ -297,6 +373,84 @@ export const editPageImage = async (
 };
 
 /**
+ * 上传并替换模板套装变体图
+ */
+export const uploadTemplateVariant = async (
+  projectId: string,
+  variantType: 'cover' | 'content' | 'transition' | 'ending',
+  file: File
+): Promise<ApiResponse> => {
+  const formData = new FormData();
+  formData.append('variant_image', file);
+  const response = await apiClient.post<ApiResponse>(
+    `/api/projects/${projectId}/templates/variant/${variantType}/upload`,
+    formData
+  );
+  return response.data;
+};
+
+/**
+ * 从历史版本中选择模板套装单图
+ */
+export const selectTemplateVariant = async (
+  projectId: string,
+  variantType: 'cover' | 'content' | 'transition' | 'ending',
+  variantUrl: string
+): Promise<ApiResponse> => {
+  const response = await apiClient.post<ApiResponse>(
+    `/api/projects/${projectId}/templates/variant/${variantType}/select`,
+    { variant_url: variantUrl }
+  );
+  return response.data;
+};
+
+/**
+ * 重新生成模板套装单图（支持额外提示词/参考图）
+ */
+export const regenerateTemplateVariant = async (
+  projectId: string,
+  variantType: 'cover' | 'content' | 'transition' | 'ending',
+  options?: {
+    extraRequirements?: string;
+    refImageUrls?: string[];
+    uploadedFiles?: File[];
+  }
+): Promise<ApiResponse> => {
+  const extraRequirements = options?.extraRequirements;
+  const refImageUrls = options?.refImageUrls;
+
+  if (options?.uploadedFiles && options.uploadedFiles.length > 0) {
+    const formData = new FormData();
+    if (extraRequirements && extraRequirements.trim()) {
+      formData.append('extra_requirements', extraRequirements);
+    }
+    if (refImageUrls && refImageUrls.length > 0) {
+      formData.append('ref_image_urls', JSON.stringify(refImageUrls));
+    }
+    options.uploadedFiles.forEach((file) => {
+      formData.append('context_images', file);
+    });
+
+    const response = await apiClient.post<ApiResponse>(
+      `/api/projects/${projectId}/templates/variant/${variantType}/regenerate`,
+      formData
+    );
+    return response.data;
+  }
+
+  const response = await apiClient.post<ApiResponse>(
+    `/api/projects/${projectId}/templates/variant/${variantType}/regenerate`,
+    {
+      ...(extraRequirements && extraRequirements.trim()
+        ? { extra_requirements: extraRequirements }
+        : {}),
+      ...(refImageUrls && refImageUrls.length > 0 ? { ref_image_urls: refImageUrls } : {}),
+    }
+  );
+  return response.data;
+};
+
+/**
  * 获取页面图片历史版本
  */
 export const getPageImageVersions = async (
@@ -319,6 +473,19 @@ export const setCurrentImageVersion = async (
 ): Promise<ApiResponse> => {
   const response = await apiClient.post<ApiResponse>(
     `/api/projects/${projectId}/pages/${pageId}/image-versions/${versionId}/set-current`
+  );
+  return response.data;
+};
+
+/**
+ * 清除单页图片（重置为未生成）
+ */
+export const clearPageImage = async (
+  projectId: string,
+  pageId: string
+): Promise<ApiResponse> => {
+  const response = await apiClient.post<ApiResponse>(
+    `/api/projects/${projectId}/pages/${pageId}/clear-image`
   );
   return response.data;
 };
@@ -353,6 +520,21 @@ export const updatePageDescription = async (
   const response = await apiClient.put<ApiResponse<Page>>(
     `/api/projects/${projectId}/pages/${pageId}/description`,
     { description_content: descriptionContent, language: lang }
+  );
+  return response.data;
+};
+
+/**
+ * 更新页面类型
+ */
+export const updatePageType = async (
+  projectId: string,
+  pageId: string,
+  pageType: string
+): Promise<ApiResponse<Page>> => {
+  const response = await apiClient.put<ApiResponse<Page>>(
+    `/api/projects/${projectId}/pages/${pageId}/type`,
+    { page_type: pageType }
   );
   return response.data;
 };
@@ -507,6 +689,8 @@ export interface Material {
   id: string;
   project_id?: string | null;
   filename: string;
+  display_name?: string | null;
+  note?: string | null;
   url: string;
   relative_path: string;
   created_at: string;
@@ -577,6 +761,48 @@ export const uploadMaterial = async (
  */
 export const deleteMaterial = async (materialId: string): Promise<ApiResponse<{ id: string }>> => {
   const response = await apiClient.delete<ApiResponse<{ id: string }>>(`/api/materials/${materialId}`);
+  return response.data;
+};
+
+/**
+ * 更新素材元数据
+ */
+export const updateMaterialMeta = async (
+  materialId: string,
+  payload: { display_name?: string | null; note?: string | null }
+): Promise<ApiResponse<{ material: Material }>> => {
+  const response = await apiClient.patch<ApiResponse<{ material: Material }>>(
+    `/api/materials/${materialId}`,
+    payload
+  );
+  return response.data;
+};
+
+/**
+ * 移动素材到目标项目（或全局）
+ */
+export const moveMaterial = async (
+  materialId: string,
+  targetProjectId?: string | null
+): Promise<ApiResponse<{ material: Material }>> => {
+  const response = await apiClient.post<ApiResponse<{ material: Material }>>(
+    `/api/materials/${materialId}/move`,
+    { target_project_id: targetProjectId ?? 'none' }
+  );
+  return response.data;
+};
+
+/**
+ * 复制素材到目标项目（或全局）
+ */
+export const copyMaterial = async (
+  materialId: string,
+  targetProjectId?: string | null
+): Promise<ApiResponse<{ material: Material }>> => {
+  const response = await apiClient.post<ApiResponse<{ material: Material }>>(
+    `/api/materials/${materialId}/copy`,
+    { target_project_id: targetProjectId ?? 'none' }
+  );
   return response.data;
 };
 

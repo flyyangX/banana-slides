@@ -10,7 +10,11 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 import sqlite3
 from sqlalchemy.exc import SQLAlchemyError
-from flask_migrate import Migrate
+try:
+    # Optional dependency: the app can run without migrations support
+    from flask_migrate import Migrate  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover
+    Migrate = None
 
 # Load environment variables from project root .env file
 _project_root = Path(__file__).parent.parent
@@ -18,7 +22,10 @@ _env_file = _project_root / '.env'
 load_dotenv(dotenv_path=_env_file, override=True)
 
 from flask import Flask
-from flask_cors import CORS
+try:
+    from flask_cors import CORS  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover
+    CORS = None
 from models import db
 from config import Config
 from controllers.material_controller import material_bp, material_global_bp
@@ -94,9 +101,15 @@ def create_app():
 
     # Initialize extensions
     db.init_app(app)
-    CORS(app, origins=cors_origins)
-    # Database migrations (Alembic via Flask-Migrate)
-    Migrate(app, db)
+    if CORS is not None:
+        CORS(app, origins=cors_origins)
+    else:
+        logging.warning("flask_cors not installed; skipping CORS init")
+    # Database migrations (Alembic via Flask-Migrate) - optional
+    if Migrate is not None:
+        Migrate(app, db)
+    else:
+        logging.warning("flask_migrate not installed; skipping migrations init")
     
     # Register blueprints
     app.register_blueprint(project_bp)
@@ -111,6 +124,15 @@ def create_app():
     app.register_blueprint(settings_bp)
 
     with app.app_context():
+        # Safety net: ensure all tables exist.
+        # In some environments the alembic version may be stamped but tables are missing
+        # (e.g., manual DB edits or corrupted/partial DB files). create_all() is additive
+        # and will not modify existing tables/columns.
+        try:
+            db.create_all()
+        except SQLAlchemyError as db_error:
+            logging.warning(f"db.create_all() failed (continuing): {db_error}")
+
         # Load settings from database and sync to app.config
         _load_settings_to_config(app)
 
@@ -244,7 +266,7 @@ app = create_app()
 if __name__ == '__main__':
     # Run development server
     if os.getenv("IN_DOCKER", "0") == "1":
-        port = 5000  # Docker 容器内部固定使用 5000 端口
+        port = 5001  # Docker 容器内部固定使用 5001 端口（与 docker-compose/nginx 保持一致）
     else:
         port = int(os.getenv('BACKEND_PORT', 5000))
     debug = os.getenv('FLASK_ENV', 'development') == 'development'

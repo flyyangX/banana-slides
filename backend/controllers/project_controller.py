@@ -275,7 +275,7 @@ def update_project(project_id):
         # Update template_style if provided
         if 'template_style' in data:
             project.template_style = data['template_style']
-        
+
         # Update export settings if provided
         if 'export_extractor_method' in data:
             project.export_extractor_method = data['export_extractor_method']
@@ -320,6 +320,31 @@ def delete_project(project_id):
         
         if not project:
             return not_found('Project')
+
+        # Delete project-scoped reference files (DB rows + disk files).
+        # NOTE: Reference files are stored under uploads/reference_files (not under project dir),
+        # so FileService.delete_project_files() won't remove them.
+        try:
+            from pathlib import Path
+            from models import ReferenceFile
+
+            upload_folder = current_app.config['UPLOAD_FOLDER']
+            reference_files = ReferenceFile.query.filter_by(project_id=project_id).all()
+            for rf in reference_files:
+                # Best-effort disk cleanup
+                try:
+                    file_path = Path(upload_folder) / rf.file_path
+                    if file_path.exists():
+                        file_path.unlink()
+                except Exception as file_err:
+                    logger.warning(
+                        f"Failed to delete reference file from disk (id={rf.id}): {file_err}"
+                    )
+
+                db.session.delete(rf)
+        except Exception as ref_err:
+            # Do not block project deletion if reference files cleanup fails
+            logger.warning(f"Reference files cleanup failed: {ref_err}", exc_info=True)
         
         # Delete project files
         from services import FileService
@@ -689,20 +714,27 @@ def generate_images(project_id):
         # 检查是否有模板图片或风格描述
         from services import FileService
         file_service = FileService(current_app.config['UPLOAD_FOLDER'])
-        use_template = data.get('use_template', True)
-        ref_image_path = None
-        if use_template:
-            ref_image_path = file_service.get_template_path(project_id)
-        
-        if not ref_image_path and not project.template_style:
-            return bad_request("请先上传模板图片或添加风格描述。")
+        template_variants = project.get_template_variants() if hasattr(project, 'get_template_variants') else {}
+        has_variant_template = any(bool(v) for v in template_variants.values())
+        has_template_image = bool(file_service.get_template_path(project_id))
+        has_template_resource = has_template_image or has_variant_template
+
+        # use_template 默认“自动”：未显式传时根据是否有模板资源决定
+        use_template_raw = data.get('use_template')
+        if use_template_raw is None:
+            use_template = has_template_resource
+        else:
+            use_template = use_template_raw
+            if isinstance(use_template, str):
+                use_template = use_template.lower() == 'true'
+            else:
+                use_template = bool(use_template)
         
         # Reconstruct outline from pages with part structure
         outline = _reconstruct_outline_from_pages(pages)
         
         # 从配置中读取默认并发数，如果请求中提供了则使用请求的值
         max_workers = data.get('max_workers', current_app.config.get('MAX_IMAGE_WORKERS', 8))
-        use_template = data.get('use_template', True)
         language = data.get('language', current_app.config.get('OUTPUT_LANGUAGE', 'zh'))
         
         # Create task
@@ -722,6 +754,21 @@ def generate_images(project_id):
         
         # Get singleton AI service instance
         ai_service = get_ai_service()
+
+        # 无模板时自动生成风格描述（写入 project.template_style）
+        should_generate_style = (not project.template_style) and (not has_template_resource or use_template is False)
+        if should_generate_style:
+            reference_files_content = _get_project_reference_files_content(project_id)
+            project_context = ProjectContext(project, reference_files_content)
+            outline_text = project.outline_text or ai_service.generate_outline_text(outline)
+            template_style = ai_service.generate_template_style(
+                project_context=project_context,
+                outline_text=outline_text,
+                extra_requirements=project.extra_requirements,
+                language=language
+            )
+            project.template_style = template_style.strip()
+            db.session.commit()
         
         # 合并额外要求和风格描述
         combined_requirements = project.extra_requirements or ""

@@ -12,6 +12,7 @@ interface SlideCardProps {
   onEdit: () => void;
   onDelete: () => void;
   isGenerating?: boolean;
+  elapsedSeconds?: number;
 }
 
 export const SlideCard: React.FC<SlideCardProps> = ({
@@ -22,6 +23,7 @@ export const SlideCard: React.FC<SlideCardProps> = ({
   onEdit,
   onDelete,
   isGenerating = false,
+  elapsedSeconds,
 }) => {
   const { confirm, ConfirmDialog } = useConfirm();
   const imageUrl = page.generated_image_path
@@ -29,6 +31,17 @@ export const SlideCard: React.FC<SlideCardProps> = ({
     : '';
   
   const generating = isGenerating || page.status === 'GENERATING';
+
+  const formatElapsed = (seconds: number) => {
+    const safeSeconds = Math.max(0, seconds);
+    const hours = Math.floor(safeSeconds / 3600);
+    const minutes = Math.floor((safeSeconds % 3600) / 60);
+    const secs = safeSeconds % 60;
+    if (hours > 0) {
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
 
   return (
     <div
@@ -83,6 +96,13 @@ export const SlideCard: React.FC<SlideCardProps> = ({
           </div>
         )}
         
+        {/* 计时角标 */}
+        {generating && typeof elapsedSeconds === 'number' && (
+          <div className="absolute top-2 left-2 text-[10px] px-2 py-0.5 rounded bg-black/60 text-white">
+            ⏱ {formatElapsed(elapsedSeconds)}
+          </div>
+        )}
+
         {/* 状态标签 */}
         <div className="absolute bottom-2 right-2">
           <StatusBadge status={page.status} />

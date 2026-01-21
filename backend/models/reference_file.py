@@ -26,7 +26,14 @@ class ReferenceFile(db.Model):
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    project = db.relationship('Project', backref='reference_files', foreign_keys=[project_id])
+    # IMPORTANT:
+    # - Projects can be deleted; any project-scoped reference files should be deleted as well.
+    # - Without cascade on the backref, deleting a project may fail with FK constraint errors.
+    project = db.relationship(
+        'Project',
+        backref=db.backref('reference_files', cascade='all, delete-orphan'),
+        foreign_keys=[project_id],
+    )
     
     def to_dict(self, include_content=True, include_failed_count=False):
         """

@@ -10,8 +10,10 @@ interface ProjectSettingsModalProps {
   // 项目设置
   extraRequirements: string;
   templateStyle: string;
+  templateUsageMode: 'auto' | 'template' | 'style';
   onExtraRequirementsChange: (value: string) => void;
   onTemplateStyleChange: (value: string) => void;
+  onTemplateUsageModeChange: (value: 'auto' | 'template' | 'style') => void;
   onSaveExtraRequirements: () => void;
   onSaveTemplateStyle: () => void;
   isSavingRequirements: boolean;
@@ -68,8 +70,10 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   onClose,
   extraRequirements,
   templateStyle,
+  templateUsageMode,
   onExtraRequirementsChange,
   onTemplateStyleChange,
+  onTemplateUsageModeChange,
   onSaveExtraRequirements,
   onSaveTemplateStyle,
   isSavingRequirements,
@@ -212,6 +216,36 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                     </p>
                   </div>
                 </div>
+
+                {/* 生成风格来源 */}
+                <div className="bg-gray-50 rounded-lg p-6 space-y-4">
+                  <div>
+                    <h4 className="text-base font-semibold text-gray-900 mb-2">生成风格来源</h4>
+                    <p className="text-sm text-gray-600">
+                      自动模式会在有模板时使用模板图，无模板时自动生成并锁定风格描述
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm text-gray-700">选择模式</label>
+                    <select
+                      value={templateUsageMode}
+                      onChange={(e) =>
+                        onTemplateUsageModeChange(e.target.value as 'auto' | 'template' | 'style')
+                      }
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-banana-500 focus:outline-none focus:ring-2 focus:ring-banana-200"
+                    >
+                      <option value="auto">自动（推荐）</option>
+                      <option value="template">优先使用模板图片</option>
+                      <option value="style">仅使用风格描述</option>
+                    </select>
+                  </div>
+                  <div className="bg-yellow-50 rounded-md p-3">
+                    <p className="text-xs text-yellow-900">
+                      💡 <strong>说明：</strong>“仅使用风格描述”会忽略模板图片，仅依据风格描述生成页面。
+                    </p>
+                  </div>
+                </div>
+
               </div>
             ) : activeTab === 'export' ? (
               <div className="max-w-3xl space-y-6">

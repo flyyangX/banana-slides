@@ -108,6 +108,44 @@ def delete_page(project_id, page_id):
         return error_response('SERVER_ERROR', str(e), 500)
 
 
+@page_bp.route('/<project_id>/pages/<page_id>/clear-image', methods=['POST'])
+def clear_page_image(project_id, page_id):
+    """
+    POST /api/projects/{project_id}/pages/{page_id}/clear-image - Clear page image and versions
+    """
+    try:
+        page = Page.query.get(page_id)
+
+        if not page or page.project_id != project_id:
+            return not_found('Page')
+
+        # Delete image files
+        file_service = FileService(current_app.config['UPLOAD_FOLDER'])
+        file_service.delete_page_image(project_id, page_id)
+
+        # Delete version records
+        PageImageVersion.query.filter_by(page_id=page_id).delete()
+
+        # Reset page image fields
+        page.generated_image_path = None
+        page.cached_image_path = None
+        page.status = 'DESCRIPTION_GENERATED' if page.description_content else 'DRAFT'
+        page.updated_at = datetime.utcnow()
+
+        # Update project
+        project = Project.query.get(project_id)
+        if project:
+            project.updated_at = datetime.utcnow()
+
+        db.session.commit()
+
+        return success_response(page.to_dict(include_versions=True))
+
+    except Exception as e:
+        db.session.rollback()
+        return error_response('SERVER_ERROR', str(e), 500)
+
+
 @page_bp.route('/<project_id>/pages/<page_id>/outline', methods=['PUT'])
 def update_page_outline(project_id, page_id):
     """
@@ -141,6 +179,40 @@ def update_page_outline(project_id, page_id):
         
         return success_response(page.to_dict())
     
+    except Exception as e:
+        db.session.rollback()
+        return error_response('SERVER_ERROR', str(e), 500)
+
+
+@page_bp.route('/<project_id>/pages/<page_id>/type', methods=['PUT'])
+def update_page_type(project_id, page_id):
+    """
+    PUT /api/projects/{project_id}/pages/{page_id}/type - Update page type
+    """
+    try:
+        page = Page.query.get(page_id)
+
+        if not page or page.project_id != project_id:
+            return not_found('Page')
+
+        data = request.get_json() or {}
+        page_type = (data.get('page_type') or 'auto').strip()
+        allowed_types = {'auto', 'cover', 'content', 'transition', 'ending'}
+        if page_type not in allowed_types:
+            return bad_request(f"Invalid page_type: {page_type}")
+
+        page.page_type = page_type
+        page.updated_at = datetime.utcnow()
+
+        # Update project
+        project = Project.query.get(project_id)
+        if project:
+            project.updated_at = datetime.utcnow()
+
+        db.session.commit()
+
+        return success_response(page.to_dict())
+
     except Exception as e:
         db.session.rollback()
         return error_response('SERVER_ERROR', str(e), 500)
@@ -244,13 +316,18 @@ def generate_page_description(project_id, page_id):
         page_data = outline_content.copy()
         if page.part:
             page_data['part'] = page.part
+
+        # 计算自动类型（auto）时的真实页面类型，避免 prompt 里退回“第1页=封面”的旧逻辑
+        total_pages = Page.query.filter_by(project_id=project_id).count()
+        from services.task_manager import infer_page_type
         
         desc_text = ai_service.generate_page_description(
             project_context,
             outline,
             page_data,
             page.order_index + 1,
-            language=language
+            language=language,
+            page_type=infer_page_type(page, total_pages)
         )
         
         # Save description
@@ -277,11 +354,21 @@ def generate_page_image(project_id, page_id):
     """
     POST /api/projects/{project_id}/pages/{page_id}/generate/image - Generate single page image
     
-    Request body:
+    Request body (JSON or multipart/form-data):
     {
         "use_template": true,
-        "force_regenerate": false
+        "force_regenerate": false,
+        "extra_requirements": "单页额外提示词（可选）",
+        "ref_image_urls": ["/files/.../materials/xxx.png", "https://..."]  // 可选
     }
+
+    For multipart/form-data:
+    - use_template: text field (true/false)
+    - force_regenerate: text field (true/false)
+    - language: text field
+    - extra_requirements: text field
+    - ref_image_urls: JSON array string
+    - context_images: file uploads (multiple files with key "context_images")
     """
     try:
         page = Page.query.get(page_id)
@@ -293,10 +380,36 @@ def generate_page_image(project_id, page_id):
         if not project:
             return not_found('Project')
         
-        data = request.get_json() or {}
-        use_template = data.get('use_template', True)
+        # Parse request data (support both JSON and multipart/form-data)
+        temp_dir = None
+        uploaded_files = []
+        if request.is_json:
+            data = request.get_json() or {}
+        else:
+            data = request.form.to_dict()
+            uploaded_files = request.files.getlist('context_images')
+            # Parse JSON array string for ref_image_urls
+            if 'ref_image_urls' in data and data['ref_image_urls']:
+                try:
+                    data['ref_image_urls'] = json.loads(data['ref_image_urls'])
+                except Exception:
+                    data['ref_image_urls'] = []
+
+        use_template_raw = data.get('use_template')
         force_regenerate = data.get('force_regenerate', False)
+        if isinstance(force_regenerate, str):
+            force_regenerate = force_regenerate.lower() == 'true'
         language = data.get('language', current_app.config.get('OUTPUT_LANGUAGE', 'zh'))
+        page_extra_requirements = (data.get('extra_requirements') or '').strip()
+        ref_image_urls = data.get('ref_image_urls') or []
+        if isinstance(ref_image_urls, str):
+            # In case frontend sends as JSON string in JSON mode
+            try:
+                ref_image_urls = json.loads(ref_image_urls)
+            except Exception:
+                ref_image_urls = []
+        if not isinstance(ref_image_urls, list):
+            ref_image_urls = []
         
         # Check if already generated
         if page.generated_image_path and not force_regenerate:
@@ -360,15 +473,21 @@ def generate_page_image(project_id, page_id):
         
         file_service = FileService(current_app.config['UPLOAD_FOLDER'])
         
-        # Get template path
-        ref_image_path = None
-        if use_template:
-            ref_image_path = file_service.get_template_path(project_id)
-        
         # 检查是否有模板图片或风格描述
-        # 如果都没有，则返回错误
-        if not ref_image_path and not project.template_style:
-            return bad_request("No template image or style description found for project")
+        template_variants = project.get_template_variants() if hasattr(project, 'get_template_variants') else {}
+        has_variant_template = any(bool(v) for v in template_variants.values())
+        has_template_image = bool(file_service.get_template_path(project_id))
+        has_template_resource = has_template_image or has_variant_template
+
+        # use_template 默认“自动”：未显式传时根据是否有模板资源决定
+        if use_template_raw is None:
+            use_template = has_template_resource
+        else:
+            use_template = use_template_raw
+            if isinstance(use_template, str):
+                use_template = use_template.lower() == 'true'
+            else:
+                use_template = bool(use_template)
         
         # Generate prompt
         page_data = page.get_outline_content() or {}
@@ -397,11 +516,48 @@ def generate_page_image(project_id, page_id):
                 additional_ref_images = image_urls
                 has_material_images = True
         
+        # 无模板时自动生成风格描述（写入 project.template_style）
+        should_generate_style = (not project.template_style) and (not has_template_resource or use_template is False)
+        if should_generate_style:
+            project_context = ProjectContext(project)
+            outline_text = project.outline_text or ai_service.generate_outline_text(outline)
+            template_style = ai_service.generate_template_style(
+                project_context=project_context,
+                outline_text=outline_text,
+                extra_requirements=project.extra_requirements,
+                language=language
+            )
+            project.template_style = template_style.strip()
+            db.session.commit()
+
         # 合并额外要求和风格描述
         combined_requirements = project.extra_requirements or ""
         if project.template_style:
             style_requirement = f"\n\nppt页面风格描述：\n\n{project.template_style}"
             combined_requirements = combined_requirements + style_requirement
+
+        # 追加单页额外提示词（不落库，只用于本次生成）
+        if page_extra_requirements:
+            combined_requirements = (combined_requirements + f"\n\n单页额外要求（仅本页生效）：\n{page_extra_requirements}").strip()
+
+        # 收集用户额外参考图：素材库URL + 上传文件
+        user_ref_images = []
+        if ref_image_urls:
+            user_ref_images.extend([str(u) for u in ref_image_urls if u])
+
+        # Save uploaded files to a persistent temp location for background task
+        if uploaded_files:
+            temp_dir = Path(tempfile.mkdtemp(dir=current_app.config['UPLOAD_FOLDER']))
+            try:
+                for uploaded_file in uploaded_files:
+                    if uploaded_file.filename:
+                        temp_path = temp_dir / secure_filename(uploaded_file.filename)
+                        uploaded_file.save(str(temp_path))
+                        user_ref_images.append(str(temp_path))
+            except Exception as e:
+                if temp_dir and temp_dir.exists():
+                    shutil.rmtree(temp_dir)
+                raise e
         
         # Create async task for image generation
         task = Task(
@@ -434,7 +590,9 @@ def generate_page_image(project_id, page_id):
             current_app.config['DEFAULT_RESOLUTION'],
             app,
             combined_requirements if combined_requirements.strip() else None,
-            language
+            language,
+            user_ref_images if user_ref_images else None,
+            str(temp_dir) if temp_dir else None
         )
         
         # Return task_id immediately

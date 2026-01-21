@@ -18,6 +18,7 @@ from .prompts import (
     get_page_description_prompt,
     get_image_generation_prompt,
     get_image_edit_prompt,
+    get_template_style_prompt,
     get_description_to_outline_prompt,
     get_description_split_prompt,
     get_outline_refinement_prompt,
@@ -349,7 +350,8 @@ class AIService:
         return pages
     
     def generate_page_description(self, project_context: ProjectContext, outline: List[Dict], 
-                                 page_outline: Dict, page_index: int, language='zh') -> str:
+                                 page_outline: Dict, page_index: int,
+                                 language='zh', page_type: str = None) -> str:
         """
         Generate description for a single page
         Based on demo.py gen_desc() logic
@@ -371,7 +373,8 @@ class AIService:
             page_outline=page_outline,
             page_index=page_index,
             part_info=part_info,
-            language=language
+            language=language,
+            page_type=page_type
         )
         
         # 根据 enable_text_reasoning 配置调整 thinking_budget
@@ -379,6 +382,32 @@ class AIService:
         response_text = self.text_provider.generate_text(desc_prompt, thinking_budget=actual_budget)
         
         return dedent(response_text)
+
+    def generate_template_style(self, project_context: ProjectContext,
+                                outline_text: str = "",
+                                extra_requirements: Optional[str] = None,
+                                language: str = None) -> str:
+        """
+        Generate a deck-level style description for project.template_style
+        
+        Args:
+            project_context: 项目上下文对象
+            outline_text: 大纲文本（可选）
+            extra_requirements: 项目额外要求（可选）
+            language: 输出语言
+        
+        Returns:
+            Style description text
+        """
+        style_prompt = get_template_style_prompt(
+            project_context=project_context,
+            outline_text=outline_text,
+            extra_requirements=extra_requirements,
+            language=language
+        )
+        actual_budget = self._get_text_thinking_budget()
+        response_text = self.text_provider.generate_text(style_prompt, thinking_budget=actual_budget)
+        return dedent(response_text).strip()
     
     def generate_outline_text(self, outline: List[Dict]) -> str:
         """
@@ -399,7 +428,8 @@ class AIService:
                             has_material_images: bool = False,
                             extra_requirements: Optional[str] = None,
                             language='zh',
-                            has_template: bool = True) -> str:
+                            has_template: bool = True,
+                            page_type: str = None) -> str:
         """
         Generate image generation prompt for a page
         Based on demo.py gen_prompts()
@@ -437,7 +467,8 @@ class AIService:
             extra_requirements=extra_requirements,
             language=language,
             has_template=has_template,
-            page_index=page_index
+            page_index=page_index,
+            page_type=page_type
         )
         
         return prompt
@@ -504,6 +535,16 @@ class AIService:
                                 logger.debug(f"Loaded MinerU image from local path: {local_path}")
                             else:
                                 logger.warning(f"MinerU image file not found (with prefix matching): {ref_img}, skipping...")
+                        elif ref_img.startswith('/files/'):
+                            # 上传目录内的本地文件（materials/pages/templates 等）
+                            from config import Config
+                            relative_path = ref_img.removeprefix('/files/').lstrip('/')
+                            local_path = os.path.join(Config.UPLOAD_FOLDER, relative_path)
+                            if os.path.exists(local_path):
+                                ref_images.append(Image.open(local_path))
+                                logger.debug(f"Loaded uploaded image from local path: {local_path}")
+                            else:
+                                logger.warning(f"Uploaded image file not found: {ref_img}, skipping...")
                         else:
                             logger.warning(f"Invalid image reference: {ref_img}, skipping...")
             

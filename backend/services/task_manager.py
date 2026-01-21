@@ -4,11 +4,12 @@ No need for Celery or Redis, uses in-memory task tracking
 """
 import logging
 import threading
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Dict, Any
 from datetime import datetime
 from sqlalchemy import func
-from models import db, Task, Page, Material, PageImageVersion
+from models import db, Task, Page, Project, Material, PageImageVersion
 from utils import get_filtered_pages
 from pathlib import Path
 
@@ -65,6 +66,95 @@ class TaskManager:
 # Global task manager instance
 task_manager = TaskManager(max_workers=4)
 
+
+def infer_page_type(page: Page, total_pages: int) -> str:
+    """
+    Infer page type based on order and title keywords.
+    """
+    explicit_type = (page.page_type or 'auto').strip()
+    if explicit_type != 'auto':
+        return explicit_type
+
+    if page.order_index == 0:
+        return 'cover'
+    if total_pages > 0 and page.order_index == total_pages - 1:
+        return 'ending'
+
+    title = ''
+    outline_content = page.get_outline_content() or {}
+    if isinstance(outline_content, dict):
+        title = outline_content.get('title', '') or ''
+
+    title_lower = title.lower()
+    transition_keywords = ['过渡', '章节', '部分', '目录', '篇章', 'section', 'part', 'agenda', 'outline', 'overview']
+    ending_keywords = ['结尾', '总结', '致谢', '谢谢', 'ending', 'summary', 'thanks', 'q&a', 'qa', '结论', '回顾']
+
+    if any(keyword in title_lower for keyword in transition_keywords):
+        return 'transition'
+    if any(keyword in title_lower for keyword in ending_keywords):
+        return 'ending'
+
+    return 'content'
+
+
+def _parse_template_variants(project: Project) -> Dict[str, str]:
+    if project.template_variants:
+        try:
+            data = json.loads(project.template_variants)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _parse_template_sets(project: Project) -> Dict[str, Dict[str, Any]]:
+    if getattr(project, 'template_sets', None):
+        try:
+            data = json.loads(project.template_sets)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _append_template_variant_history(active_set: Dict[str, Any], variant_type: str, relative_path: str,
+                                     max_history: int = 10) -> Dict[str, Any]:
+    if not isinstance(active_set, dict):
+        active_set = {}
+    history = active_set.get('template_variants_history')
+    if not isinstance(history, dict):
+        history = {}
+    items = history.get(variant_type)
+    if not isinstance(items, list):
+        items = []
+    # 去重并置顶最新
+    items = [p for p in items if p and p != relative_path]
+    items.insert(0, relative_path)
+    if max_history and len(items) > max_history:
+        items = items[:max_history]
+    history[variant_type] = items
+    active_set['template_variants_history'] = history
+    return active_set
+
+
+def pick_template_for_page(project: Project, page: Page, total_pages: int, file_service) -> str | None:
+    """
+    Pick template image path based on page type and project template variants.
+    Falls back to content -> template_image_path -> None.
+    """
+    template_variants = _parse_template_variants(project)
+    page_type = infer_page_type(page, total_pages)
+
+    candidate_rel_path = template_variants.get(page_type)
+    if not candidate_rel_path and page_type != 'content':
+        candidate_rel_path = template_variants.get('content')
+
+    if candidate_rel_path:
+        absolute_path = file_service.get_absolute_path(candidate_rel_path)
+        if Path(absolute_path).exists():
+            return absolute_path
+
+    return file_service.get_template_path(project.id)
 
 def save_image_with_version(image, project_id: str, page_id: str, file_service,
                             page_obj=None, image_format: str = 'PNG') -> tuple[str, int]:
@@ -191,6 +281,7 @@ def generate_descriptions_task(task_id: str, project_id: str, ai_service,
             # Generate descriptions in parallel
             completed = 0
             failed = 0
+            total_pages = len(pages)
             
             def generate_single_desc(page_id, page_outline, page_index):
                 """
@@ -200,13 +291,22 @@ def generate_descriptions_task(task_id: str, project_id: str, ai_service,
                 # 关键修复：在子线程中也需要应用上下文
                 with app.app_context():
                     try:
+                        # Get page from database in this thread (for page_type / order_index)
+                        page_obj = Page.query.get(page_id)
+                        if not page_obj:
+                            raise ValueError(f"Page {page_id} not found")
+
                         # Get singleton AI service instance
                         from services.ai_service_manager import get_ai_service
                         ai_service = get_ai_service()
                         
                         desc_text = ai_service.generate_page_description(
-                            project_context, outline, page_outline, page_index,
-                            language=language
+                            project_context,
+                            outline,
+                            page_outline,
+                            page_obj.order_index + 1,
+                            language=language,
+                            page_type=infer_page_type(page_obj, total_pages)
                         )
                         
                         # Parse description into structured format
@@ -266,7 +366,6 @@ def generate_descriptions_task(task_id: str, project_id: str, ai_service,
                 logger.info(f"Task {task_id} COMPLETED - {completed} pages generated, {failed} failed")
             
             # Update project status
-            from models import Project
             project = Project.query.get(project_id)
             if project and failed == 0:
                 project.status = 'DESCRIPTIONS_GENERATED'
@@ -331,6 +430,7 @@ def generate_images_task(task_id: str, project_id: str, ai_service, file_service
             # Generate images in parallel
             completed = 0
             failed = 0
+            total_pages = len(pages)
             
             def generate_single_image(page_id, page_data, page_index):
                 """
@@ -382,18 +482,23 @@ def generate_images_task(task_id: str, project_id: str, ai_service, file_service
                         
                         # 在子线程中动态获取模板路径，确保使用最新模板
                         page_ref_image_path = None
-                        if use_template:
-                            page_ref_image_path = file_service.get_template_path(project_id)
+                        project = Project.query.get(project_id)
+                        if use_template and project:
+                            page_ref_image_path = pick_template_for_page(
+                                project, page_obj, total_pages, file_service
+                            )
                             # 注意：如果有风格描述，即使没有模板图片也允许生成
                             # 这个检查已经在 controller 层完成，这里不再检查
                         
                         # Generate image prompt
+                        inferred_page_type = infer_page_type(page_obj, total_pages)
                         prompt = ai_service.generate_image_prompt(
-                            outline, page_data, desc_text, page_index,
+                            outline, page_data, desc_text, page_obj.order_index + 1,
                             has_material_images=has_material_images,
                             extra_requirements=extra_requirements,
                             language=language,
-                            has_template=use_template
+                            has_template=bool(page_ref_image_path),
+                            page_type=inferred_page_type
                         )
                         logger.debug(f"Generated image prompt for page {page_id}")
                         
@@ -465,7 +570,6 @@ def generate_images_task(task_id: str, project_id: str, ai_service, file_service
                 logger.info(f"Task {task_id} COMPLETED - {completed} images generated, {failed} failed")
             
             # Update project status
-            from models import Project
             project = Project.query.get(project_id)
             if project and failed == 0:
                 project.status = 'COMPLETED'
@@ -487,7 +591,9 @@ def generate_single_page_image_task(task_id: str, project_id: str, page_id: str,
                                     use_template: bool = True, aspect_ratio: str = "16:9",
                                     resolution: str = "2K", app=None,
                                     extra_requirements: str = None,
-                                    language: str = None):
+                                    language: str = None,
+                                    user_ref_images: List[str] = None,
+                                    temp_dir: str = None):
     """
     Background task for generating a single page image
     
@@ -529,8 +635,8 @@ def generate_single_page_image_task(task_id: str, project_id: str, page_id: str,
                 else:
                     desc_text = str(text_content)
             
-            # 从描述文本中提取图片 URL
-            additional_ref_images = []
+            # 从描述文本中提取图片 URL（desc里的素材）
+            additional_ref_images: List[str] = []
             has_material_images = False
             
             if desc_text:
@@ -539,11 +645,28 @@ def generate_single_page_image_task(task_id: str, project_id: str, page_id: str,
                     logger.info(f"Found {len(image_urls)} image(s) in page {page_id} description")
                     additional_ref_images = image_urls
                     has_material_images = True
+
+            # 合并用户额外提供的参考图（素材库选择 / 上传图片等）
+            if user_ref_images:
+                # 去重，保持稳定顺序：先用户提供，再desc提取
+                merged = []
+                for u in user_ref_images:
+                    if u and u not in merged:
+                        merged.append(u)
+                for u in additional_ref_images:
+                    if u and u not in merged:
+                        merged.append(u)
+                additional_ref_images = merged
+                has_material_images = True
             
             # Get template path if use_template
             ref_image_path = None
-            if use_template:
-                ref_image_path = file_service.get_template_path(project_id)
+            total_pages = Page.query.filter_by(project_id=project_id).count()
+            project = Project.query.get(project_id)
+            if use_template and project:
+                ref_image_path = pick_template_for_page(
+                    project, page, total_pages, file_service
+                )
                 # 注意：如果有风格描述，即使没有模板图片也允许生成
                 # 这个检查已经在 controller 层完成，这里不再检查
             
@@ -557,7 +680,8 @@ def generate_single_page_image_task(task_id: str, project_id: str, page_id: str,
                 has_material_images=has_material_images,
                 extra_requirements=extra_requirements,
                 language=language,
-                has_template=use_template
+                has_template=bool(ref_image_path),
+                page_type=infer_page_type(page, total_pages)
             )
             
             # Generate image
@@ -605,6 +729,17 @@ def generate_single_page_image_task(task_id: str, project_id: str, page_id: str,
             if page:
                 page.status = 'FAILED'
                 db.session.commit()
+        finally:
+            # Clean up temp directory if created
+            if temp_dir:
+                try:
+                    import shutil
+                    from pathlib import Path
+                    temp_path = Path(temp_dir)
+                    if temp_path.exists():
+                        shutil.rmtree(temp_dir)
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup temp directory {temp_dir}: {e}")
 
 
 def edit_page_image_task(task_id: str, project_id: str, page_id: str,
@@ -712,6 +847,217 @@ def edit_page_image_task(task_id: str, project_id: str, page_id: str,
             if page:
                 page.status = 'FAILED'
                 db.session.commit()
+
+
+def generate_template_variants_task(task_id: str, project_id: str, types: List[str],
+                                    ai_service, file_service,
+                                    aspect_ratio: str = "16:9", resolution: str = "2K",
+                                    app=None, extra_requirements: str = None):
+    """
+    Background task for generating template variants based on reference image.
+    """
+    if app is None:
+        raise ValueError("Flask app instance must be provided")
+
+    with app.app_context():
+        try:
+            task = Task.query.get(task_id)
+            if not task:
+                return
+
+            task.status = 'PROCESSING'
+            task.set_progress({
+                "total": len(types),
+                "completed": 0,
+                "failed": 0
+            })
+            db.session.commit()
+
+            project = Project.query.get(project_id)
+            if not project:
+                raise ValueError("Project not found")
+
+            ref_image_path = file_service.get_template_path(project_id)
+            if not ref_image_path:
+                raise ValueError("No template image found for project")
+
+            from services.prompts import get_template_variant_prompt
+
+            template_sets = _parse_template_sets(project)
+            template_key = project.active_template_key or 'legacy'
+            active_set = template_sets.get(template_key) or {}
+            active_variants = active_set.get('template_variants') if isinstance(active_set, dict) else {}
+            if not isinstance(active_variants, dict):
+                active_variants = {}
+            active_set = {
+                "template_image_path": project.template_image_path,
+                "template_variants": active_variants,
+                "template_variants_history": (active_set.get('template_variants_history')
+                                              if isinstance(active_set, dict) else {}) or {}
+            }
+            template_sets[template_key] = active_set
+            completed = 0
+            failed = 0
+
+            for variant_type in types:
+                try:
+                    prompt = get_template_variant_prompt(variant_type)
+                    if extra_requirements and extra_requirements.strip():
+                        prompt = f"{prompt}\n\n额外要求（请务必遵循）：\n{extra_requirements.strip()}\n"
+                    image = ai_service.generate_image(
+                        prompt=prompt,
+                        ref_image_path=ref_image_path,
+                        aspect_ratio=aspect_ratio,
+                        resolution=resolution
+                    )
+                    if not image:
+                        raise ValueError("Failed to generate image")
+
+                    relative_path = file_service.save_template_variant_image(
+                        image, project_id, variant_type, template_key=template_key, with_timestamp=True
+                    )
+                    active_variants[variant_type] = relative_path
+                    active_set = _append_template_variant_history(active_set, variant_type, relative_path)
+                    completed += 1
+                except Exception as e:
+                    logger.error(f"Failed to generate template variant {variant_type}: {e}", exc_info=True)
+                    failed += 1
+
+                task.update_progress(completed=completed, failed=failed)
+                db.session.commit()
+
+            template_sets[template_key] = {
+                "template_image_path": project.template_image_path,
+                "template_variants": active_variants,
+                "template_variants_history": active_set.get('template_variants_history', {})
+            }
+            project.set_template_sets(template_sets)
+            project.active_template_key = template_key
+            project.set_template_variants(active_variants)
+            project.updated_at = datetime.utcnow()
+            db.session.commit()
+
+            task = Task.query.get(task_id)
+            if task:
+                task.status = 'COMPLETED' if failed == 0 else 'PARTIAL'
+                task.completed_at = datetime.utcnow()
+                db.session.commit()
+
+        except Exception as e:
+            task = Task.query.get(task_id)
+            if task:
+                task.status = 'FAILED'
+                task.error_message = str(e)
+                task.completed_at = datetime.utcnow()
+                db.session.commit()
+
+
+def generate_single_template_variant_task(task_id: str, project_id: str, variant_type: str,
+                                          ai_service, file_service,
+                                          aspect_ratio: str = "16:9", resolution: str = "2K",
+                                          app=None, extra_requirements: str = None,
+                                          additional_ref_images: List[str] = None,
+                                          temp_dir: str = None):
+    """
+    Background task for generating a single template variant with optional extra requirements
+    and additional reference images.
+    """
+    if app is None:
+        raise ValueError("Flask app instance must be provided")
+
+    with app.app_context():
+        try:
+            task = Task.query.get(task_id)
+            if not task:
+                return
+
+            task.status = 'PROCESSING'
+            task.set_progress({
+                "total": 1,
+                "completed": 0,
+                "failed": 0
+            })
+            db.session.commit()
+
+            project = Project.query.get(project_id)
+            if not project:
+                raise ValueError("Project not found")
+
+            ref_image_path = file_service.get_template_path(project_id)
+            if not ref_image_path:
+                raise ValueError("No template image found for project")
+
+            from services.prompts import get_template_variant_prompt
+
+            prompt = get_template_variant_prompt(variant_type)
+            if extra_requirements and extra_requirements.strip():
+                prompt = f"{prompt}\n\n额外要求（请务必遵循）：\n{extra_requirements.strip()}\n"
+
+            image = ai_service.generate_image(
+                prompt=prompt,
+                ref_image_path=ref_image_path,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                additional_ref_images=additional_ref_images or None
+            )
+            if not image:
+                raise ValueError("Failed to generate image")
+
+            template_sets = _parse_template_sets(project)
+            template_key = project.active_template_key or 'legacy'
+            active_set = template_sets.get(template_key) or {}
+            active_variants = active_set.get('template_variants') if isinstance(active_set, dict) else {}
+            if not isinstance(active_variants, dict):
+                active_variants = {}
+
+            relative_path = file_service.save_template_variant_image(
+                image, project_id, variant_type, template_key=template_key, with_timestamp=True
+            )
+
+            active_variants[variant_type] = relative_path
+            active_set = _append_template_variant_history(active_set, variant_type, relative_path)
+            template_sets[template_key] = {
+                "template_image_path": project.template_image_path,
+                "template_variants": active_variants,
+                "template_variants_history": active_set.get('template_variants_history', {})
+            }
+            project.set_template_sets(template_sets)
+            project.active_template_key = template_key
+            project.set_template_variants(active_variants)
+            project.updated_at = datetime.utcnow()
+            db.session.commit()
+
+            task = Task.query.get(task_id)
+            if task:
+                task.status = 'COMPLETED'
+                task.completed_at = datetime.utcnow()
+                task.set_progress({
+                    "total": 1,
+                    "completed": 1,
+                    "failed": 0
+                })
+                db.session.commit()
+
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            logger.error(f"Template variant task {task_id} FAILED: {error_detail}")
+            task = Task.query.get(task_id)
+            if task:
+                task.status = 'FAILED'
+                task.error_message = str(e)
+                task.completed_at = datetime.utcnow()
+                db.session.commit()
+        finally:
+            if temp_dir:
+                try:
+                    import shutil
+                    from pathlib import Path
+                    temp_path = Path(temp_dir)
+                    if temp_path.exists():
+                        shutil.rmtree(temp_dir)
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup temp directory {temp_dir}: {e}")
 
 
 def generate_material_image_task(task_id: str, project_id: str, prompt: str,

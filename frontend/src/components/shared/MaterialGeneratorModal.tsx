@@ -25,12 +25,15 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
   isOpen,
   onClose,
 }) => {
+  const materialGenerateTaskKey = 'materialGenerateTask';
   const { show } = useToast();
   const [prompt, setPrompt] = useState('');
   const [refImage, setRefImage] = useState<File | null>(null);
   const [extraImages, setExtraImages] = useState<File[]>([]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generatingStartedAt, setGeneratingStartedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(Date.now());
   const [isMaterialSelectorOpen, setIsMaterialSelectorOpen] = useState(false);
 
   const handleRefImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -92,6 +95,38 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
 
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  const readStoredTask = () => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const raw = window.sessionStorage.getItem(materialGenerateTaskKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { taskId?: string; startedAt?: number; projectId?: string | null };
+      if (!parsed?.taskId || typeof parsed.startedAt !== 'number') return null;
+      return parsed;
+    } catch (error) {
+      console.warn('[MaterialGeneratorModal] 读取生成任务失败:', error);
+      return null;
+    }
+  };
+
+  const writeStoredTask = (value: { taskId: string; startedAt: number; projectId?: string | null }) => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.sessionStorage.setItem(materialGenerateTaskKey, JSON.stringify(value));
+    } catch (error) {
+      console.warn('[MaterialGeneratorModal] 写入生成任务失败:', error);
+    }
+  };
+
+  const clearStoredTask = () => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.sessionStorage.removeItem(materialGenerateTaskKey);
+    } catch (error) {
+      console.warn('[MaterialGeneratorModal] 清除生成任务失败:', error);
+    }
+  };
+
   // 清理轮询
   useEffect(() => {
     return () => {
@@ -101,15 +136,51 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
     };
   }, []);
 
-  const pollMaterialTask = async (taskId: string) => {
-    const targetProjectId = projectId || 'global'; // 使用'global'作为Task的project_id
+  useEffect(() => {
+    if (!isOpen) return;
+    const storedTask = readStoredTask();
+    if (!storedTask?.taskId) return;
+    const targetProjectId = storedTask.projectId || 'global';
+    setIsGenerating(true);
+    setGeneratingStartedAt(storedTask.startedAt || Date.now());
+    pollMaterialTask(storedTask.taskId, targetProjectId);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isGenerating) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isGenerating]);
+
+  const formatElapsed = (seconds: number) => {
+    const safeSeconds = Math.max(0, seconds);
+    const hours = Math.floor(safeSeconds / 3600);
+    const minutes = Math.floor((safeSeconds % 3600) / 60);
+    const secs = safeSeconds % 60;
+    if (hours > 0) {
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
+
+  const generatingElapsed = generatingStartedAt
+    ? Math.floor((now - generatingStartedAt) / 1000)
+    : 0;
+
+  const pollMaterialTask = async (taskId: string, targetProjectId?: string) => {
+    const resolvedProjectId = targetProjectId || projectId || 'global'; // 使用'global'作为Task的project_id
+    const isProjectScoped = resolvedProjectId !== 'global';
     const maxAttempts = 60; // 最多轮询60次（约2分钟）
     let attempts = 0;
 
     const poll = async () => {
       try {
         attempts++;
-        const response = await getTaskStatus(targetProjectId, taskId);
+        const response = await getTaskStatus(resolvedProjectId, taskId);
         const task: Task = response.data;
 
         if (task.status === 'COMPLETED') {
@@ -119,7 +190,7 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
           
           if (imageUrl) {
             setPreviewUrl(getImageUrl(imageUrl));
-            const message = projectId 
+            const message = isProjectScoped 
               ? '素材生成成功，已保存到历史素材库' 
               : '素材生成成功，已保存到全局素材库';
             show({ message, type: 'success' });
@@ -128,6 +199,8 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
           }
           
           setIsGenerating(false);
+          setGeneratingStartedAt(null);
+          clearStoredTask();
           if (pollingIntervalRef.current) {
             clearInterval(pollingIntervalRef.current);
             pollingIntervalRef.current = null;
@@ -138,6 +211,8 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
             type: 'error',
           });
           setIsGenerating(false);
+          setGeneratingStartedAt(null);
+          clearStoredTask();
           if (pollingIntervalRef.current) {
             clearInterval(pollingIntervalRef.current);
             pollingIntervalRef.current = null;
@@ -147,6 +222,8 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
           if (attempts >= maxAttempts) {
             show({ message: '素材生成超时，请稍后查看素材库', type: 'warning' });
             setIsGenerating(false);
+            setGeneratingStartedAt(null);
+            clearStoredTask();
             if (pollingIntervalRef.current) {
               clearInterval(pollingIntervalRef.current);
               pollingIntervalRef.current = null;
@@ -158,6 +235,8 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
         if (attempts >= maxAttempts) {
           show({ message: '轮询任务状态失败，请稍后查看素材库', type: 'error' });
           setIsGenerating(false);
+          setGeneratingStartedAt(null);
+          clearStoredTask();
           if (pollingIntervalRef.current) {
             clearInterval(pollingIntervalRef.current);
             pollingIntervalRef.current = null;
@@ -178,6 +257,8 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
     }
 
     setIsGenerating(true);
+    const startedAt = Date.now();
+    setGeneratingStartedAt(startedAt);
     try {
       // 如果没有projectId，使用'none'表示生成全局素材（后端会转换为'global'用于Task）
       const targetProjectId = projectId || 'none';
@@ -185,11 +266,14 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
       const taskId = resp.data?.task_id;
       
       if (taskId) {
+        writeStoredTask({ taskId, startedAt, projectId: projectId || null });
         // 开始轮询任务状态
-        await pollMaterialTask(taskId);
+        await pollMaterialTask(taskId, projectId || 'global');
       } else {
         show({ message: '素材生成失败：未返回任务ID', type: 'error' });
         setIsGenerating(false);
+        setGeneratingStartedAt(null);
+        clearStoredTask();
       }
     } catch (error: any) {
       show({
@@ -197,6 +281,8 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
         type: 'error',
       });
       setIsGenerating(false);
+      setGeneratingStartedAt(null);
+      clearStoredTask();
     }
   };
 
@@ -210,7 +296,14 @@ export const MaterialGeneratorModal: React.FC<MaterialGeneratorModalProps> = ({
       <div className="space-y-4">
         {/* 顶部：生成结果预览（始终显示最新一次生成） */}
         <div className="bg-gray-50 rounded-lg border border-gray-200 p-4">
-          <h4 className="text-sm font-semibold text-gray-700 mb-2">生成结果</h4>
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-sm font-semibold text-gray-700">生成结果</h4>
+            {isGenerating && (
+              <span className="text-xs text-gray-500">
+                生成中 · 已运行 {formatElapsed(generatingElapsed)}
+              </span>
+            )}
+          </div>
           {isGenerating ? (
             <div className="aspect-video rounded-lg overflow-hidden border border-gray-200">
               <Skeleton className="w-full h-full" />

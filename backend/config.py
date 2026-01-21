@@ -80,6 +80,8 @@ class Config:
     # 图片生成配置
     DEFAULT_ASPECT_RATIO = "16:9"
     DEFAULT_RESOLUTION = "2K"
+    # 参考图压缩（仅压缩，不缩放）
+    REF_IMAGE_JPEG_QUALITY = int(os.getenv('REF_IMAGE_JPEG_QUALITY', '80'))
     
     # 日志配置
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
